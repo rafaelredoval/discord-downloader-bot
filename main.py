@@ -35,4 +35,8 @@ async def on_message(message):
             link
         ])
 
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN não definido nas variáveis do Railway")
+
 client.run(TOKEN)
+
