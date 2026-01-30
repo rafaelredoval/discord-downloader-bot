@@ -9,8 +9,17 @@ from datetime import datetime, timezone
 # ENV VARS (Railway)
 # =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
-SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))       # canal onde usa !scan
-DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID"))  # canal que recebe arquivos
+SCAN_CHANNEL_ID = os.getenv("SCAN_CHANNEL_ID")  # canal onde usa !scan
+DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID") # canal que recebe arquivos
+
+if not SCAN_CHANNEL_ID:
+    raise RuntimeError("❌ SCAN_CHANNEL_ID não definido no Railway")
+
+if not DOWNLOAD_CHANNEL_ID:
+    raise RuntimeError("❌ DOWNLOAD_CHANNEL_ID não definido no Railway")
+
+SCAN_CHANNEL_ID = int(SCAN_CHANNEL_ID)
+DOWNLOAD_CHANNEL_ID = int(DOWNLOAD_CHANNEL_ID)
 START_DATE_STR = os.getenv("START_DATE")  # opcional YYYY-MM-DD
 
 if not TOKEN:
