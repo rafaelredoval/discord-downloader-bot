@@ -5,7 +5,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-TOKEN = os.getenv("MTQ1OTgxNDE3NzgyNzk4MzQ3Mg.GsXecL.XuopVIZTtMgSZ805-kXh802UC9A4ArtSx1DQkI")
+TOKEN = os.getenv("DISCORD_TOKEN")
 START_DATE_STR = os.getenv("START_DATE")
 
 if not TOKEN:
