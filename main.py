@@ -1,67 +1,57 @@
 import discord
+import yt_dlp
 import os
-print("ENV VARS:", list(os.environ.keys()))
-import re
-import subprocess
-from datetime import datetime, timezone
+import zipfile
+import shutil
+from discord import File
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-START_DATE_STR = os.getenv("START_DATE")
-
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN não definido no Railway")
-
-if not START_DATE_STR:
-    raise RuntimeError("START_DATE não definido no Railway")
-
-START_DATE = datetime.strptime(START_DATE_STR, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-
+TOKEN = os.getenv('DISCORD_TOKEN') # Defina isso no Railway
 intents = discord.Intents.default()
 intents.message_content = True
-
 client = discord.Client(intents=intents)
 
-URL_REGEX = re.compile(r'https?://\S+')
-
-DOWNLOAD_BASE = "downloads"
-
-@client.event
-async def on_ready():
-    print(f"✅ Bot conectado como {client.user}")
-    print(f"📅 Processando mensagens a partir de {START_DATE.date()}")
+def download_media(url, folder):
+    ydl_opts = {
+        'outtmpl': f'{folder}/%(title)s.%(ext)s',
+        'format': 'best',
+        'quiet': True,
+        'nocheckcertificate': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
 @client.event
 async def on_message(message):
-    if message.author.bot:
+    if message.author == client.user:
         return
 
-    # 🔒 filtro por data
-    if message.created_at < START_DATE:
-        return
+    if 'instagram.com' in message.content or 'tiktok.com' in message.content or 'youtube.com' in message.content:
+        temp_dir = f"dl_{message.id}"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        msg_status = await message.channel.send("⚔️ Iniciando a coleta da mídia, aguarde...")
 
-    urls = URL_REGEX.findall(message.content)
-    if not urls:
-        return
-
-    user_id = str(message.author.id)
-    user_folder = os.path.join(DOWNLOAD_BASE, user_id)
-    os.makedirs(user_folder, exist_ok=True)
-
-    for url in urls:
         try:
-            print(f"⬇️ Baixando de {url} | Usuário {user_id}")
+            # Download
+            download_media(message.content, temp_dir)
+            
+            # Criar ZIP
+            zip_name = f"midia_{message.id}.zip"
+            with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        zipf.write(os.path.join(root, file), file)
 
-            subprocess.run(
-                [
-                    "yt-dlp",
-                    "-o",
-                    f"{user_folder}/%(title)s.%(ext)s",
-                    url
-                ],
-                check=True
-            )
+            # Enviar para o Discord
+            await message.channel.send(content=f"📦 Aqui está seu tesouro, fidalgo {message.author.mention}:", file=File(zip_name))
+            
+            # Limpeza de arquivos
+            os.remove(zip_name)
+            shutil.rmtree(temp_dir)
+            await msg_status.delete()
 
         except Exception as e:
-            print(f"❌ Erro ao baixar {url}: {e}")
+            await message.channel.send(f"❌ Lamentável, mas houve um erro: {e}")
+            if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 client.run(TOKEN)
