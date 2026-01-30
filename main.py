@@ -1,5 +1,6 @@
 import discord
 import os
+print("ENV VARS:", list(os.environ.keys()))
 import re
 import subprocess
 from datetime import datetime, timezone
