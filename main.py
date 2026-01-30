@@ -6,42 +6,61 @@ async def process_message(message):
     if not urls:
         return
 
+    download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
+    if not download_channel:
+        print("❌ Canal de download não encontrado")
+        return
+
     user_id = str(message.author.id)
     date_folder = message.created_at.strftime("%Y-%m-%d")
-    user_folder = os.path.join(DOWNLOAD_BASE, user_id, date_folder)
-    os.makedirs(user_folder, exist_ok=True)
 
     for url in urls:
-        try:
-            print(f"⬇️ Baixando {url} | Usuário {user_id}")
+        # 🔒 pasta única por URL
+        safe_name = str(abs(hash(url)))
+        download_folder = os.path.join(
+            DOWNLOAD_BASE, user_id, date_folder, safe_name
+        )
+        os.makedirs(download_folder, exist_ok=True)
 
+        status_msg = await download_channel.send(
+            f"⏳ **Baixando conteúdo**\n"
+            f"🔗 {url}\n"
+            f"👤 Usuário: <@{user_id}>"
+        )
+
+        try:
             subprocess.run(
                 [
                     "yt-dlp",
                     "-o",
-                    f"{user_folder}/%(title)s.%(ext)s",
+                    f"{download_folder}/%(title)s.%(ext)s",
                     url
                 ],
                 check=True
             )
 
-            # enviar todos os arquivos baixados
-            for filename in os.listdir(user_folder):
-                file_path = os.path.join(user_folder, filename)
+            await status_msg.edit(content="📤 **Enviando arquivo(s)…**")
+
+            files_sent = 0
+
+            for filename in os.listdir(download_folder):
+                file_path = os.path.join(download_folder, filename)
 
                 if os.path.isfile(file_path):
-                    try:
-                        await message.channel.send(
-                            content=f"📥 Arquivo enviado por <@{user_id}>",
-                            file=discord.File(file_path)
-                        )
-                        os.remove(file_path)
-                        print(f"✅ Enviado e removido: {filename}")
+                    await download_channel.send(
+                        content=f"📦 Enviado por <@{user_id}>",
+                        file=discord.File(file_path)
+                    )
+                    os.remove(file_path)
+                    files_sent += 1
 
-                    except Exception as e:
-                        print(f"❌ Erro ao enviar {filename}: {e}")
+            if files_sent == 0:
+                await status_msg.edit(content="⚠️ Nenhum arquivo foi gerado.")
+            else:
+                await status_msg.edit(
+                    content=f"✅ **Download concluído ({files_sent} arquivo(s))**"
+                )
 
         except subprocess.CalledProcessError as e:
-            print(f"❌ yt-dlp falhou para {url}: {e}")
-        except Exception as e:
-            print(f"❌ Erro inesperado: {e}")
+            await status_msg.edit(content="❌ **Erro ao baixar o conteúdo**")
+            print(e)
