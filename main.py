@@ -13,9 +13,10 @@ START_DATE_STR = os.getenv("START_DATE")  # opcional
 if not TOKEN:
     raise RuntimeError("❌ DISCORD_TOKEN não definido no Railway")
 
-# START_DATE opcional
 if START_DATE_STR:
-    START_DATE = datetime.strptime(START_DATE_STR, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    START_DATE = datetime.strptime(
+        START_DATE_STR, "%Y-%m-%d"
+    ).replace(tzinfo=timezone.utc)
 else:
     START_DATE = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -43,12 +44,22 @@ async def on_ready():
     print(f"✅ Bot conectado como {client.user}")
     print(f"📅 Processando mensagens a partir de {START_DATE.date()}")
 
-@client.event
-async def on_message(message):
+    for guild in client.guilds:
+        for channel in guild.text_channels:
+            try:
+                async for message in channel.history(
+                    after=START_DATE,
+                    oldest_first=True,
+                    limit=None
+                ):
+                    await process_message(message)
+            except Exception as e:
+                print(f"⚠️ Erro no canal {channel.name}: {e}")
+
+async def process_message(message):
     if message.author.bot:
         return
 
-    # filtro por data
     if message.created_at < START_DATE:
         return
 
@@ -57,12 +68,13 @@ async def on_message(message):
         return
 
     user_id = str(message.author.id)
-    user_folder = os.path.join(DOWNLOAD_BASE, user_id)
+    date_folder = message.created_at.strftime("%Y-%m-%d")
+    user_folder = os.path.join(DOWNLOAD_BASE, user_id, date_folder)
     os.makedirs(user_folder, exist_ok=True)
 
     for url in urls:
         try:
-            print(f"⬇️ Baixando: {url} | Usuário: {user_id}")
+            print(f"⬇️ Baixando {url} | Usuário {user_id}")
 
             subprocess.run(
                 [
@@ -78,6 +90,10 @@ async def on_message(message):
             print(f"❌ yt-dlp falhou para {url}: {e}")
         except Exception as e:
             print(f"❌ Erro inesperado: {e}")
+
+@client.event
+async def on_message(message):
+    await process_message(message)
 
 # =====================
 # START BOT
