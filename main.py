@@ -1,30 +1,43 @@
 import discord
 import os
-print("ENV VARS:", list(os.environ.keys()))
 import re
 import subprocess
 from datetime import datetime, timezone
 
+# =====================
+# ENV VARS
+# =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
-START_DATE_STR = os.getenv("START_DATE")
+START_DATE_STR = os.getenv("START_DATE")  # opcional
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN não definido no Railway")
+    raise RuntimeError("❌ DISCORD_TOKEN não definido no Railway")
 
-if not START_DATE_STR:
-    raise RuntimeError("START_DATE não definido no Railway")
+# START_DATE opcional
+if START_DATE_STR:
+    START_DATE = datetime.strptime(START_DATE_STR, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+else:
+    START_DATE = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-START_DATE = datetime.strptime(START_DATE_STR, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+print("✅ START_DATE:", START_DATE.isoformat())
 
+# =====================
+# DISCORD CONFIG
+# =====================
 intents = discord.Intents.default()
 intents.message_content = True
 
 client = discord.Client(intents=intents)
 
+# =====================
+# DOWNLOAD CONFIG
+# =====================
 URL_REGEX = re.compile(r'https?://\S+')
-
 DOWNLOAD_BASE = "downloads"
 
+# =====================
+# EVENTS
+# =====================
 @client.event
 async def on_ready():
     print(f"✅ Bot conectado como {client.user}")
@@ -35,7 +48,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # 🔒 filtro por data
+    # filtro por data
     if message.created_at < START_DATE:
         return
 
@@ -49,7 +62,7 @@ async def on_message(message):
 
     for url in urls:
         try:
-            print(f"⬇️ Baixando de {url} | Usuário {user_id}")
+            print(f"⬇️ Baixando: {url} | Usuário: {user_id}")
 
             subprocess.run(
                 [
@@ -61,10 +74,12 @@ async def on_message(message):
                 check=True
             )
 
+        except subprocess.CalledProcessError as e:
+            print(f"❌ yt-dlp falhou para {url}: {e}")
         except Exception as e:
-            print(f"❌ Erro ao baixar {url}: {e}")
+            print(f"❌ Erro inesperado: {e}")
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN não definido nas variáveis do Railway")
-
+# =====================
+# START BOT
+# =====================
 client.run(TOKEN)
