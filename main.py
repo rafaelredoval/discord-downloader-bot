@@ -128,22 +128,35 @@ async def on_message(message):
         await message.channel.send("⛔ Scan cancelado")
         return
 
-    # =====================
-    # !botlimpar
-    # =====================
-    if content == "!botlimpar":
-        removed = 0
+# =====================
+# !botlimpar
+# =====================
+if content == "!botlimpar":
+    if not message.channel.permissions_for(message.guild.me).manage_messages:
+        await message.channel.send("❌ Não tenho permissão de **Gerenciar Mensagens**")
+        return
 
-        async for msg in message.channel.history(limit=300):
-            for reaction in msg.reactions:
-                async for user in reaction.users():
-                    if user.id == client.user.id:
-                        await reaction.remove(user)
-                        removed += 1
+    removed = 0
 
-        await message.channel.send(
-            f"🧹 Limpeza concluída — {removed} reações removidas"
-        )
+    await message.channel.send("🧹 Limpando reações do bot...")
+
+    async for msg in message.channel.history(limit=1000):
+        if not msg.reactions:
+            continue
+
+        for reaction in msg.reactions:
+            try:
+                await reaction.remove(client.user)
+                removed += 1
+            except discord.Forbidden:
+                pass
+            except discord.HTTPException:
+                pass
+
+    await message.channel.send(
+        f"✅ Limpeza concluída — {removed} reações removidas"
+    )
+
 
 # =====================
 # FUNCTIONS
