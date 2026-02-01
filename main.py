@@ -2,24 +2,37 @@ import discord
 import os
 import re
 import subprocess
-import json
 from datetime import datetime, timezone
+import asyncio
 
 # =====================
 # ENV VARS
 # =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
-SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID", "0"))
-DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", "0"))
+SCAN_CHANNEL_ID = os.getenv("SCAN_CHANNEL_ID")
+DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
+POST_CHANNEL_ID = os.getenv("POST_CHANNEL_ID")
+START_DATE_STR = os.getenv("START_DATE")
 
 if not TOKEN:
     raise RuntimeError("❌ DISCORD_TOKEN não definido")
-
-if SCAN_CHANNEL_ID == 0:
+if not SCAN_CHANNEL_ID:
     raise RuntimeError("❌ SCAN_CHANNEL_ID não definido")
-
-if DOWNLOAD_CHANNEL_ID == 0:
+if not DOWNLOAD_CHANNEL_ID:
     raise RuntimeError("❌ DOWNLOAD_CHANNEL_ID não definido")
+if not POST_CHANNEL_ID:
+    raise RuntimeError("❌ POST_CHANNEL_ID não definido")
+
+SCAN_CHANNEL_ID = int(SCAN_CHANNEL_ID)
+DOWNLOAD_CHANNEL_ID = int(DOWNLOAD_CHANNEL_ID)
+POST_CHANNEL_ID = int(POST_CHANNEL_ID)
+
+if START_DATE_STR:
+    DEFAULT_START_DATE = datetime.strptime(
+        START_DATE_STR, "%Y-%m-%d"
+    ).replace(tzinfo=timezone.utc)
+else:
+    DEFAULT_START_DATE = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # =====================
 # DISCORD CONFIG
@@ -28,113 +41,101 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# =====================
-# DOWNLOAD CONFIG
-# =====================
-URL_REGEX = re.compile(r'https?://\S+')
+URL_REGEX = re.compile(r"https?://\S+")
 DOWNLOAD_BASE = "downloads"
 
 # =====================
-# UTILS
+# SCAN CONTROL
 # =====================
-def format_seconds(seconds: int) -> str:
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-
-    if h > 0:
-        return f"{h:02d}h {m:02d}m {s:02d}s"
-    if m > 0:
-        return f"{m}m {s}s"
-    return f"{s}s"
+scan_running = False
+scan_cancelled = False
 
 # =====================
-# PROCESS MESSAGE
+# HELPERS
 # =====================
-async def process_message(message, create_thread=False):
+def parse_date_from_command(content):
+    parts = content.split()
+    for p in parts:
+        try:
+            return datetime.strptime(p, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return DEFAULT_START_DATE
+
+# =====================
+# CORE PROCESS
+# =====================
+async def process_message(message, download_channel, create_thread=False):
+    global scan_cancelled
+
+    if scan_cancelled:
+        return None
+
     if message.author.bot:
-        return 0, 0, None
+        return None
 
     if message.reactions:
-        return 0, 0, None
+        return None
 
     urls = URL_REGEX.findall(message.content)
     if not urls:
-        return 0, 0, None
-
-    base_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
-    if not base_channel:
-        return 0, 0, None
-
-    target_channel = base_channel
-
-    if create_thread:
-        thread_name = f"{message.author.display_name}"
-        target_channel = await base_channel.create_thread(
-            name=thread_name,
-            type=discord.ChannelType.public_thread
-        )
+        return None
 
     user_id = str(message.author.id)
     date_folder = message.created_at.strftime("%Y-%m-%d")
 
-    total_seconds = 0
-    total_videos = 0
+    thread = None
+    if create_thread:
+        thread = await download_channel.create_thread(
+            name=f"{message.author.name}",
+            auto_archive_duration=1440
+        )
+
+    target = thread if thread else download_channel
+
+    success = 0
+    fail = 0
 
     for url in urls:
+        if scan_cancelled:
+            break
+
         safe_name = str(abs(hash(url)))
         folder = os.path.join(DOWNLOAD_BASE, user_id, date_folder, safe_name)
         os.makedirs(folder, exist_ok=True)
 
-        status = await target_channel.send(
-            f"⏳ **Baixando**\n🔗 {url}\n👤 <@{user_id}>"
-        )
+        status = await target.send(f"⏳ Baixando:\n{url}")
 
         try:
             subprocess.run(
-                [
-                    "yt-dlp",
-                    "--print-json",
-                    "-o",
-                    f"{folder}/%(title)s.%(ext)s",
-                    url
-                ],
-                check=True,
-                capture_output=True,
-                text=True
+                ["yt-dlp", "-o", f"{folder}/%(title)s.%(ext)s", url],
+                check=True
             )
 
-            await status.edit(content="📤 **Enviando arquivo(s)…**")
-
-            for file in os.listdir(folder):
-                path = os.path.join(folder, file)
+            sent = False
+            for f in os.listdir(folder):
+                path = os.path.join(folder, f)
                 if os.path.isfile(path):
-                    await target_channel.send(
-                        content=f"📦 Enviado por <@{user_id}>",
-                        file=discord.File(path)
-                    )
+                    await target.send(file=discord.File(path))
                     os.remove(path)
-                    total_videos += 1
+                    sent = True
 
-            await status.edit(content="✅ **Concluído**")
-            await message.add_reaction("✅")
-
-            # tenta ler duração
-            try:
-                info_path = os.path.join(folder, "info.json")
-                if os.path.exists(info_path):
-                    with open(info_path) as f:
-                        info = json.load(f)
-                        total_seconds += int(info.get("duration", 0))
-            except:
-                pass
+            if sent:
+                await message.add_reaction("✅")
+                await status.edit(content="✅ Concluído")
+                success += 1
+            else:
+                await message.add_reaction("❌")
+                await status.edit(content="⚠️ Nenhum arquivo")
+                fail += 1
 
         except Exception as e:
-            await status.edit(content="❌ **Erro no download**")
             await message.add_reaction("❌")
+            await status.edit(content="❌ Erro no download")
             print(e)
+            fail += 1
 
-    return total_seconds, total_videos, target_channel
+    return success, fail, message.author.name
 
 # =====================
 # EVENTS
@@ -145,47 +146,83 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+    global scan_running, scan_cancelled
+
     if message.author.bot:
         return
 
     if message.channel.id != SCAN_CHANNEL_ID:
         return
 
-    if message.content.lower() not in ["!scan", "!scan post"]:
+    # -----------------
+    # CANCEL SCAN
+    # -----------------
+    if message.content.startswith("!cancelscan"):
+        if not scan_running:
+            await message.channel.send("⚠️ Nenhum scan em andamento.")
+            return
+
+        scan_cancelled = True
+        await message.channel.send("🛑 **Scan cancelado pelo usuário**")
         return
 
-    create_thread = message.content.lower() == "!scan post"
+    # -----------------
+    # START SCAN
+    # -----------------
+    if not message.content.startswith("!scan"):
+        return
 
-    await message.channel.send("🔍 Iniciando varredura…")
+    if scan_running:
+        await message.channel.send("⚠️ Já existe um scan em andamento.")
+        return
+
+    scan_running = True
+    scan_cancelled = False
+
+    create_thread = "post" in message.content
+    start_date = parse_date_from_command(message.content)
+
+    await message.channel.send(
+        f"🔎 Scan iniciado a partir de {start_date.date()}"
+    )
 
     summary = {}
 
-    async for msg in message.channel.history(limit=None, oldest_first=True):
-        seconds, videos, _ = await process_message(msg, create_thread)
+    try:
+        for guild in client.guilds:
+            for channel in guild.text_channels:
+                async for msg in channel.history(
+                    after=start_date, oldest_first=True
+                ):
+                    if scan_cancelled:
+                        break
 
-        if videos > 0:
-            uid = msg.author.id
-            if uid not in summary:
-                summary[uid] = {
-                    "name": msg.author.display_name,
-                    "videos": 0,
-                    "seconds": 0
-                }
+                    result = await process_message(
+                        msg,
+                        client.get_channel(
+                            POST_CHANNEL_ID if create_thread else DOWNLOAD_CHANNEL_ID
+                        ),
+                        create_thread=create_thread
+                    )
 
-            summary[uid]["videos"] += videos
-            summary[uid]["seconds"] += seconds
+                    if result:
+                        ok, fail, user = result
+                        summary.setdefault(user, 0)
+                        summary[user] += ok
 
-    if not summary:
-        await message.channel.send("⚠️ Nenhum conteúdo novo encontrado.")
+                if scan_cancelled:
+                    break
+
+    finally:
+        scan_running = False
+
+    if scan_cancelled:
+        await message.channel.send("🛑 Scan interrompido.")
         return
 
-    report = "📊 **RESUMO DA VARREDURA**\n\n"
-    for data in summary.values():
-        report += (
-            f"👤 **{data['name']}**\n"
-            f"🎬 Vídeos: {data['videos']}\n"
-            f"⏱️ Duração total: {format_seconds(data['seconds'])}\n\n"
-        )
+    report = "**📊 RESUMO FINAL**\n"
+    for user, count in summary.items():
+        report += f"👤 {user}: {count} arquivos\n"
 
     await message.channel.send(report)
 
