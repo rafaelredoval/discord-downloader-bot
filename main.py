@@ -1,9 +1,8 @@
 import discord
 import os
 import re
-import asyncio
 import subprocess
-import json
+import asyncio
 from datetime import datetime, timezone
 
 # =====================
@@ -13,8 +12,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID", "0"))
 DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", "0"))
 
-if not TOKEN or SCAN_CHANNEL_ID == 0 or DOWNLOAD_CHANNEL_ID == 0:
-    raise RuntimeError("❌ Variáveis obrigatórias não definidas")
+if not TOKEN:
+    raise RuntimeError("❌ DISCORD_TOKEN não definido")
+
+if SCAN_CHANNEL_ID == 0:
+    raise RuntimeError("❌ SCAN_CHANNEL_ID não definido")
+
+if DOWNLOAD_CHANNEL_ID == 0:
+    raise RuntimeError("❌ DOWNLOAD_CHANNEL_ID não definido")
 
 # =====================
 # DISCORD CONFIG
@@ -42,20 +47,14 @@ def parse_date(arg):
     except:
         return None
 
-def bot_already_reacted(message):
-    for reaction in message.reactions:
-        if reaction.me:
-            return True
-    return False
-
 # =====================
 # EVENTS
 # =====================
 @client.event
 async def on_ready():
     print(f"✅ Bot conectado como {client.user}")
-    print(f"📌 Canal Scan:", SCAN_CHANNEL_ID)
-    print(f"📦 Canal Download:", DOWNLOAD_CHANNEL_ID)
+    print(f"📌 Canal Scan: {SCAN_CHANNEL_ID}")
+    print(f"📦 Canal Download: {DOWNLOAD_CHANNEL_ID}")
 
 # =====================
 # SCAN FUNCTION
@@ -64,25 +63,21 @@ async def run_scan(ctx_message, date_filter=None):
     global scan_cancelled
     scan_cancelled = False
 
-    channel = ctx_message.channel
+    scan_channel = ctx_message.channel
     download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    await channel.send("🔍 **Iniciando varredura...**")
+    await scan_channel.send("🔍 **Iniciando varredura...**")
 
-    async for msg in channel.history(
+    async for msg in scan_channel.history(
         limit=None,
         oldest_first=True,
         after=date_filter
     ):
         if scan_cancelled:
-            await channel.send("⛔ Scan cancelado")
+            await scan_channel.send("⛔ **Scan cancelado**")
             return
 
         if msg.author.bot:
-            continue
-
-        # 🔒 ignora mensagens já processadas pelo bot
-        if bot_already_reacted(msg):
             continue
 
         urls = URL_REGEX.findall(msg.content)
@@ -91,6 +86,7 @@ async def run_scan(ctx_message, date_filter=None):
 
         for url in urls:
             try:
+                # testa se o link é válido
                 subprocess.run(
                     ["yt-dlp", "--skip-download", url],
                     check=True,
@@ -100,10 +96,10 @@ async def run_scan(ctx_message, date_filter=None):
 
                 await msg.add_reaction("✅")
 
-            except:
+            except Exception:
                 await msg.add_reaction("❌")
 
-    await channel.send("✅ **Scan finalizado**")
+    await scan_channel.send("✅ **Scan finalizado**")
 
 # =====================
 # COMMANDS
@@ -115,10 +111,8 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    print("CANAL ATUAL:", message.channel.id)
-
     # =====================
-    # !scan
+    # !scan [data]
     # =====================
     if message.content.startswith("!scan"):
         if message.channel.id != SCAN_CHANNEL_ID:
@@ -144,15 +138,13 @@ async def on_message(message):
         removed = 0
 
         async for msg in message.channel.history(limit=None):
-            for reaction in msg.reactions:
-                if reaction.me:
-                    try:
-                        await reaction.clear()
-                        removed += 1
-                    except:
-                        pass
+            try:
+                await msg.clear_reactions()
+                removed += 1
+            except:
+                pass
 
-        await message.channel.send(f"🧹 Reações do bot removidas: {removed}")
+        await message.channel.send(f"🧹 Reações limpas em {removed} mensagens")
 
 # =====================
 # START
