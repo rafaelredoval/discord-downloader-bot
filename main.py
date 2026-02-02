@@ -2,20 +2,19 @@ import discord
 import os
 import re
 import asyncio
-from datetime import datetime, timezone
 
 # =====================
-# ENV VARS
+# ENV
 # =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
 SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID", 0))
 DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", 0))
 
 if not TOKEN or not SCAN_CHANNEL_ID or not DOWNLOAD_CHANNEL_ID:
-    raise RuntimeError("❌ Variáveis de ambiente não configuradas")
+    raise RuntimeError("❌ Variáveis de ambiente ausentes")
 
 # =====================
-# DISCORD CONFIG
+# DISCORD
 # =====================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -24,17 +23,18 @@ intents.reactions = True
 client = discord.Client(intents=intents)
 
 # =====================
-# GLOBALS
+# CONSTANTES
 # =====================
 URL_REGEX = re.compile(r"https?://\S+")
 DOWNLOAD_BASE = "downloads"
+DISCORD_FILE_LIMIT = 8 * 1024 * 1024  # 8MB
 
 scan_running = False
 scan_cancelled = False
 processed_links = set()
 
 # =====================
-# yt-dlp async
+# yt-dlp
 # =====================
 async def run_yt_dlp(url, output_path):
     process = await asyncio.create_subprocess_exec(
@@ -45,25 +45,21 @@ async def run_yt_dlp(url, output_path):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await process.communicate()
+    _, stderr = await process.communicate()
     return process.returncode, stderr.decode()
 
 # =====================
-# LOAD PROCESSED LINKS
+# LOAD LINKS
 # =====================
-async def load_processed_links(download_channel):
+async def load_processed_links(channel):
     processed_links.clear()
-
-    async for msg in download_channel.history(limit=None):
+    async for msg in channel.history(limit=None):
         if msg.content:
-            urls = URL_REGEX.findall(msg.content)
-            for url in urls:
+            for url in URL_REGEX.findall(msg.content):
                 processed_links.add(url)
 
-    print(f"🔁 {len(processed_links)} links já processados")
-
 # =====================
-# PROCESS MESSAGE
+# PROCESS MSG
 # =====================
 async def process_message(message, download_channel):
     urls = URL_REGEX.findall(message.content)
@@ -71,8 +67,7 @@ async def process_message(message, download_channel):
         return 0
 
     success = 0
-    user_id = str(message.author.id)
-    date_folder = message.created_at.strftime("%Y-%m-%d")
+    user_id = message.author.id
 
     for url in urls:
         if scan_cancelled:
@@ -84,8 +79,7 @@ async def process_message(message, download_channel):
 
         folder = os.path.join(
             DOWNLOAD_BASE,
-            user_id,
-            date_folder,
+            str(user_id),
             str(abs(hash(url)))
         )
         os.makedirs(folder, exist_ok=True)
@@ -102,18 +96,29 @@ async def process_message(message, download_channel):
 
         for file in os.listdir(folder):
             path = os.path.join(folder, file)
-            if os.path.isfile(path):
+            if not os.path.isfile(path):
+                continue
+
+            size = os.path.getsize(path)
+
+            if size > DISCORD_FILE_LIMIT:
+                await download_channel.send(
+                    f"⚠️ Arquivo grande demais ({size//1024//1024}MB)\n"
+                    f"👤 <@{user_id}>\n🔗 {url}"
+                )
+                await message.add_reaction("⚠️")
+            else:
                 await download_channel.send(
                     content=f"📦 <@{user_id}> {url}",
                     file=discord.File(path)
                 )
-                os.remove(path)
+                await message.add_reaction("✅")
+
+            os.remove(path)
 
         processed_links.add(url)
-        await message.add_reaction("✅")
         success += 1
-
-        await asyncio.sleep(2)  # ↓↓↓ diminui chance de 429
+        await asyncio.sleep(2)
 
     return success
 
@@ -132,7 +137,7 @@ async def run_scan(ctx):
     await load_processed_links(download_channel)
 
     await ctx.channel.send(
-        f"🔍 Scan iniciado — ignorando {len(processed_links)} links duplicados"
+        f"🔍 Scan iniciado ({len(processed_links)} links ignorados)"
     )
 
     total = 0
@@ -142,7 +147,6 @@ async def run_scan(ctx):
             break
         if msg.author.bot:
             continue
-
         total += await process_message(msg, download_channel)
 
     scan_running = False
@@ -150,10 +154,10 @@ async def run_scan(ctx):
     if scan_cancelled:
         await ctx.channel.send("⛔ Scan cancelado")
     else:
-        await ctx.channel.send(f"✅ Scan finalizado — {total} novos downloads")
+        await ctx.channel.send(f"✅ Scan finalizado — {total} novos")
 
 # =====================
-# CLEAN REACTIONS
+# CLEAN
 # =====================
 async def clean_reactions(channel):
     async for msg in channel.history(limit=None):
@@ -169,7 +173,7 @@ async def clean_reactions(channel):
 # =====================
 @client.event
 async def on_ready():
-    print(f"✅ Bot conectado como {client.user}")
+    print(f"✅ Conectado como {client.user}")
 
 @client.event
 async def on_message(message):
@@ -180,22 +184,22 @@ async def on_message(message):
     if message.channel.id != SCAN_CHANNEL_ID:
         return
 
-    content = message.content.lower().strip()
+    cmd = message.content.lower().strip()
 
-    if content == "!scan":
+    if cmd == "!scan":
         if scan_running:
             await message.channel.send("⚠️ Scan já em execução")
             return
         await run_scan(message)
 
-    elif content == "!cancelscan":
+    elif cmd == "!cancelscan":
         scan_cancelled = True
-        await message.channel.send("⛔ Cancelando scan...")
+        await message.channel.send("⛔ Cancelando scan")
 
-    elif content == "!botlimpar":
+    elif cmd == "!botlimpar":
         await message.channel.send("🧹 Limpando reações...")
         await clean_reactions(message.channel)
-        await message.channel.send("✅ Reações removidas")
+        await message.channel.send("✅ Limpo")
 
 # =====================
 # START
