@@ -2,6 +2,7 @@ import discord
 import os
 import re
 import asyncio
+from datetime import datetime
 
 # =====================
 # ENV
@@ -49,20 +50,19 @@ async def run_yt_dlp(url, output_path):
     return process.returncode, stderr.decode()
 
 # =====================
-# LOAD LINKS
+# LOAD LINKS JÁ BAIXADOS
 # =====================
 async def load_processed_links(channel):
     processed_links.clear()
     async for msg in channel.history(limit=None):
-        if msg.content:
-            for url in URL_REGEX.findall(msg.content):
-                processed_links.add(url)
+        for url in URL_REGEX.findall(msg.content or ""):
+            processed_links.add(url)
 
 # =====================
-# PROCESS MSG
+# PROCESS MESSAGE
 # =====================
 async def process_message(message, download_channel):
-    urls = URL_REGEX.findall(message.content)
+    urls = URL_REGEX.findall(message.content or "")
     if not urls:
         return 0
 
@@ -125,7 +125,7 @@ async def process_message(message, download_channel):
 # =====================
 # SCAN
 # =====================
-async def run_scan(ctx):
+async def run_scan(ctx, date_filter=None):
     global scan_running, scan_cancelled
 
     scan_running = True
@@ -136,9 +136,12 @@ async def run_scan(ctx):
 
     await load_processed_links(download_channel)
 
-    await ctx.channel.send(
-        f"🔍 Scan iniciado ({len(processed_links)} links ignorados)"
-    )
+    msg = "🔍 Scan iniciado"
+    if date_filter:
+        msg += f" a partir de {date_filter.date()}"
+    msg += f" — ignorando {len(processed_links)} links duplicados"
+
+    await ctx.channel.send(msg)
 
     total = 0
 
@@ -147,6 +150,9 @@ async def run_scan(ctx):
             break
         if msg.author.bot:
             continue
+        if date_filter and msg.created_at < date_filter:
+            continue
+
         total += await process_message(msg, download_channel)
 
     scan_running = False
@@ -154,7 +160,7 @@ async def run_scan(ctx):
     if scan_cancelled:
         await ctx.channel.send("⛔ Scan cancelado")
     else:
-        await ctx.channel.send(f"✅ Scan finalizado — {total} novos")
+        await ctx.channel.send(f"✅ Scan finalizado — {total} downloads")
 
 # =====================
 # CLEAN
@@ -173,7 +179,7 @@ async def clean_reactions(channel):
 # =====================
 @client.event
 async def on_ready():
-    print(f"✅ Conectado como {client.user}")
+    print(f"✅ Bot conectado como {client.user}")
 
 @client.event
 async def on_message(message):
@@ -184,22 +190,36 @@ async def on_message(message):
     if message.channel.id != SCAN_CHANNEL_ID:
         return
 
-    cmd = message.content.lower().strip()
+    content = message.content.strip()
+    parts = content.split()
 
-    if cmd == "!scan":
+    command = parts[0].lower()
+
+    if command == "!scan":
         if scan_running:
             await message.channel.send("⚠️ Scan já em execução")
             return
-        await run_scan(message)
 
-    elif cmd == "!cancelscan":
+        date_filter = None
+        if len(parts) > 1:
+            try:
+                date_filter = datetime.fromisoformat(parts[1])
+            except:
+                await message.channel.send(
+                    "❌ Data inválida. Use: !scan AAAA-MM-DD"
+                )
+                return
+
+        await run_scan(message, date_filter)
+
+    elif command in ("!cancelscan", "!cancelarscan"):
         scan_cancelled = True
-        await message.channel.send("⛔ Cancelando scan")
+        await message.channel.send("⛔ Cancelando scan...")
 
-    elif cmd == "!botlimpar":
-        await message.channel.send("🧹 Limpando reações...")
+    elif command == "!botlimpar":
+        await message.channel.send("🧹 Limpando reações do bot...")
         await clean_reactions(message.channel)
-        await message.channel.send("✅ Limpo")
+        await message.channel.send("✅ Reações limpas")
 
 # =====================
 # START
