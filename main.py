@@ -1,227 +1,171 @@
-import discord
 import os
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-# =====================
-# ENV
-# =====================
+import discord
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID", 0))
-DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", 0))
+SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))
+DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID"))
 
-if not TOKEN or not SCAN_CHANNEL_ID or not DOWNLOAD_CHANNEL_ID:
-    raise RuntimeError("❌ Variáveis de ambiente ausentes")
-
-# =====================
-# DISCORD
-# =====================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.messages = True
 intents.reactions = True
 
 client = discord.Client(intents=intents)
 
-# =====================
-# CONSTANTES
-# =====================
-URL_REGEX = re.compile(r"https?://\S+")
-DOWNLOAD_BASE = "downloads"
-DISCORD_FILE_LIMIT = 8 * 1024 * 1024  # 8MB
+scan_task = None
+cancel_scan = False
 
-scan_running = False
-scan_cancelled = False
-processed_links = set()
+URL_REGEX = re.compile(r"(https?://[^\s]+)")
 
-# =====================
-# yt-dlp
-# =====================
-async def run_yt_dlp(url, output_path):
-    process = await asyncio.create_subprocess_exec(
-        "yt-dlp",
-        "--no-playlist",
-        "-o", output_path,
-        url,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await process.communicate()
-    return process.returncode, stderr.decode()
 
-# =====================
-# LOAD LINKS JÁ BAIXADOS
-# =====================
-async def load_processed_links(channel):
-    processed_links.clear()
+# =========================
+# UTILIDADES
+# =========================
+
+def parse_date_filter(args: list[str]):
+    """
+    Aceita:
+    - hoje
+    - ontem
+    - YYYY-MM-DD
+    - YYYY-MM-DD HH:MM
+    """
+    now = datetime.now(timezone.utc)
+
+    if not args:
+        return None
+
+    arg = args[0].lower()
+
+    if arg == "hoje":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if arg == "ontem":
+        yesterday = now - timedelta(days=1)
+        return yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        if len(args) >= 2:
+            dt = datetime.fromisoformat(f"{args[0]} {args[1]}")
+        else:
+            dt = datetime.fromisoformat(args[0])
+
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+async def collect_existing_links(channel: discord.TextChannel):
+    links = set()
     async for msg in channel.history(limit=None):
-        for url in URL_REGEX.findall(msg.content or ""):
-            processed_links.add(url)
+        for match in URL_REGEX.findall(msg.content):
+            links.add(match)
+    return links
 
-# =====================
-# PROCESS MESSAGE
-# =====================
-async def process_message(message, download_channel):
-    urls = URL_REGEX.findall(message.content or "")
-    if not urls:
-        return 0
 
-    success = 0
-    user_id = message.author.id
-
-    for url in urls:
-        if scan_cancelled:
-            break
-
-        if url in processed_links:
-            await message.add_reaction("♻️")
-            continue
-
-        folder = os.path.join(
-            DOWNLOAD_BASE,
-            str(user_id),
-            str(abs(hash(url)))
-        )
-        os.makedirs(folder, exist_ok=True)
-
-        code, err = await run_yt_dlp(
-            url,
-            f"{folder}/%(title)s.%(ext)s"
-        )
-
-        if code != 0:
-            print("❌ yt-dlp erro:", err)
-            await message.add_reaction("❌")
-            continue
-
-        for file in os.listdir(folder):
-            path = os.path.join(folder, file)
-            if not os.path.isfile(path):
-                continue
-
-            size = os.path.getsize(path)
-
-            if size > DISCORD_FILE_LIMIT:
-                await download_channel.send(
-                    f"⚠️ Arquivo grande demais ({size//1024//1024}MB)\n"
-                    f"👤 <@{user_id}>\n🔗 {url}"
-                )
-                await message.add_reaction("⚠️")
-            else:
-                await download_channel.send(
-                    content=f"📦 <@{user_id}> {url}",
-                    file=discord.File(path)
-                )
-                await message.add_reaction("✅")
-
-            os.remove(path)
-
-        processed_links.add(url)
-        success += 1
-        await asyncio.sleep(2)
-
-    return success
-
-# =====================
+# =========================
 # SCAN
-# =====================
-async def run_scan(ctx, date_filter=None):
-    global scan_running, scan_cancelled
+# =========================
 
-    scan_running = True
-    scan_cancelled = False
+async def run_scan(trigger_message: discord.Message, date_filter: datetime | None):
+    global cancel_scan
 
     scan_channel = client.get_channel(SCAN_CHANNEL_ID)
     download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    await load_processed_links(download_channel)
+    if not scan_channel or not download_channel:
+        await trigger_message.channel.send("❌ Canal inválido.")
+        return
 
-    msg = "🔍 Scan iniciado"
-    if date_filter:
-        msg += f" a partir de {date_filter.date()}"
-    msg += f" — ignorando {len(processed_links)} links duplicados"
+    await trigger_message.channel.send(
+        "🔍 Scan iniciado — ignorando links duplicados"
+    )
 
-    await ctx.channel.send(msg)
-
-    total = 0
+    existing_links = await collect_existing_links(download_channel)
+    new_links = []
+    count = 0
 
     async for msg in scan_channel.history(limit=None, oldest_first=True):
-        if scan_cancelled:
-            break
-        if msg.author.bot:
+        if cancel_scan:
+            await trigger_message.channel.send("⛔ Scan cancelado.")
+            return
+
+        msg_date = msg.created_at.astimezone(timezone.utc)
+
+        if date_filter and msg_date < date_filter:
             continue
-        if date_filter and msg.created_at < date_filter:
-            continue
 
-        total += await process_message(msg, download_channel)
+        for link in URL_REGEX.findall(msg.content):
+            if link not in existing_links:
+                existing_links.add(link)
+                new_links.append(link)
 
-    scan_running = False
+        # evita estouro de payload
+        if len(new_links) >= 20:
+            await download_channel.send("\n".join(new_links))
+            count += len(new_links)
+            new_links.clear()
+            await asyncio.sleep(1)
 
-    if scan_cancelled:
-        await ctx.channel.send("⛔ Scan cancelado")
-    else:
-        await ctx.channel.send(f"✅ Scan finalizado — {total} downloads")
+    if new_links:
+        await download_channel.send("\n".join(new_links))
+        count += len(new_links)
 
-# =====================
-# CLEAN
-# =====================
-async def clean_reactions(channel):
-    async for msg in channel.history(limit=None):
-        for reaction in msg.reactions:
-            if reaction.me:
-                try:
-                    await reaction.clear()
-                except:
-                    pass
+    await trigger_message.channel.send(f"✅ Scan finalizado — {count} links enviados")
 
-# =====================
-# EVENTS
-# =====================
+
+# =========================
+# EVENTOS
+# =========================
+
 @client.event
 async def on_ready():
     print(f"✅ Bot conectado como {client.user}")
 
+
 @client.event
-async def on_message(message):
-    global scan_cancelled
+async def on_message(message: discord.Message):
+    global scan_task, cancel_scan
 
     if message.author.bot:
         return
-    if message.channel.id != SCAN_CHANNEL_ID:
-        return
 
-    content = message.content.strip()
-    parts = content.split()
+    content = message.content.strip().lower()
 
-    command = parts[0].lower()
-
-    if command == "!scan":
-        if scan_running:
-            await message.channel.send("⚠️ Scan já em execução")
+    # !scan
+    if content.startswith("!scan"):
+        if scan_task and not scan_task.done():
+            await message.channel.send("⚠️ Já existe um scan em andamento.")
             return
 
-        date_filter = None
-        if len(parts) > 1:
-            try:
-                date_filter = datetime.fromisoformat(parts[1])
-            except:
-                await message.channel.send(
-                    "❌ Data inválida. Use: !scan AAAA-MM-DD"
-                )
-                return
+        parts = message.content.split()
+        date_filter = parse_date_filter(parts[1:])
 
-        await run_scan(message, date_filter)
+        if parts[1:] and not date_filter:
+            await message.channel.send(
+                "❌ Data inválida.\nUse:\n"
+                "`!scan hoje`\n"
+                "`!scan ontem`\n"
+                "`!scan YYYY-MM-DD`\n"
+                "`!scan YYYY-MM-DD HH:MM`"
+            )
+            return
 
-    elif command in ("!cancelscan", "!cancelarscan"):
-        scan_cancelled = True
+        cancel_scan = False
+        scan_task = asyncio.create_task(run_scan(message, date_filter))
+
+    # !cancelscan
+    if content in ("!cancelscan", "!cancel scan"):
+        cancel_scan = True
         await message.channel.send("⛔ Cancelando scan...")
 
-    elif command == "!botlimpar":
-        await message.channel.send("🧹 Limpando reações do bot...")
-        await clean_reactions(message.channel)
-        await message.channel.send("✅ Reações limpas")
 
-# =====================
+# =========================
 # START
-# =====================
+# =========================
+
 client.run(TOKEN)
