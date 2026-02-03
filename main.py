@@ -2,23 +2,16 @@ import os
 import re
 import asyncio
 import subprocess
-import discord
-from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-# ========= CONFIG =========
+import discord
+from discord.ext import commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))
 DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID"))
-DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID"))
-
-DOWNLOAD_BASE = "./downloads"
-MAX_DISCORD_FILE_MB = 25
 
 URL_REGEX = re.compile(r"(https?://\S+)")
-
-os.makedirs(DOWNLOAD_BASE, exist_ok=True)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -26,175 +19,141 @@ intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ========= CONTROLE =========
+DOWNLOAD_BASE = "downloads"
 
-scan_running = False
-cancel_scan = False
+FAILED_LINKS = {}   # url -> metadata
+DOWNLOADED_URLS = set()
 
-failed_links = []
-long_videos = []
+BRAZIL_TZ = timezone(timedelta(hours=-3))
 
-# ========= UTIL =========
+def parse_datetime(date_str, time_str):
+    dt = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M")
+    return dt.replace(tzinfo=BRAZIL_TZ)
 
-def brasilia_now():
-    return datetime.now(timezone(timedelta(hours=-3)))
+async def try_download(url, message, download_channel):
+    user_id = str(message.author.id)
+    date_folder = message.created_at.astimezone(BRAZIL_TZ).strftime("%Y-%m-%d")
+    safe_name = str(abs(hash(url)))
 
-def parse_date_arg(arg: str | None):
-    if not arg:
-        return None
-
-    now = brasilia_now()
-
-    if arg.lower() == "hoje":
-        return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    if arg.lower() == "ontem":
-        d = now - timedelta(days=1)
-        return d.replace(hour=0, minute=0, second=0, microsecond=0)
+    folder = os.path.join(DOWNLOAD_BASE, user_id, date_folder, safe_name)
+    os.makedirs(folder, exist_ok=True)
 
     try:
-        return datetime.strptime(arg, "%d/%m/%Y %H:%M").replace(
-            tzinfo=timezone(timedelta(hours=-3))
+        subprocess.run(
+            ["yt-dlp", "-o", f"{folder}/%(title)s.%(ext)s", url],
+            check=True,
+            timeout=900
         )
-    except:
-        return None
 
-async def safe_sleep():
-    await asyncio.sleep(0.6)
-
-# ========= DOWNLOAD =========
-
-async def try_download(msg: discord.Message, download_channel):
-    urls = URL_REGEX.findall(msg.content)
-    if not urls:
-        return False
-
-    for url in urls:
-        folder = os.path.join(DOWNLOAD_BASE, str(msg.id))
-        os.makedirs(folder, exist_ok=True)
-
-        try:
-            proc = subprocess.run(
-                ["yt-dlp", "-o", f"{folder}/%(title)s.%(ext)s", url],
-                capture_output=True
-            )
-
-            if proc.returncode != 0:
-                failed_links.append(url)
-                await msg.add_reaction("🧐")
-                await download_channel.send(url)
-                return False
-
-            for file in os.listdir(folder):
-                path = os.path.join(folder, file)
-                size_mb = os.path.getsize(path) / (1024 * 1024)
-
-                if size_mb > MAX_DISCORD_FILE_MB:
-                    long_videos.append(url)
-                    await msg.add_reaction("💾")
-                    await download_channel.send(url)
-                    return False
-
+        sent = False
+        for f in os.listdir(folder):
+            path = os.path.join(folder, f)
+            if os.path.isfile(path):
                 await download_channel.send(
-                    file=discord.File(path),
-                    content=f"📦 Enviado por <@{msg.author.id}>"
+                    content=f"📦 <@{user_id}>",
+                    file=discord.File(path)
                 )
                 os.remove(path)
+                sent = True
 
-            await msg.add_reaction("✅")
+        if sent:
+            await message.add_reaction("✅")
+            DOWNLOADED_URLS.add(url)
+            FAILED_LINKS.pop(url, None)
             return True
 
-        except Exception:
-            failed_links.append(url)
-            await msg.add_reaction("🧐")
-            await download_channel.send(url)
-            return False
+        raise RuntimeError("Nenhum arquivo gerado")
 
-# ========= SCAN =========
+    except subprocess.TimeoutExpired:
+        await message.add_reaction("💾")
+    except Exception:
+        await message.add_reaction("🧐")
 
-async def run_scan(ctx, date_filter=None):
-    global scan_running, cancel_scan
+    FAILED_LINKS[url] = {
+        "message_id": message.id,
+        "channel_id": message.channel.id,
+        "author_id": user_id,
+        "created_at": message.created_at
+    }
 
-    if scan_running:
-        await ctx.send("⚠️ Já existe um scan em execução.")
-        return
+    await download_channel.send(f"🔍 Falha no download:\n{url}")
+    return False
 
-    scan_running = True
-    cancel_scan = False
-
-    channel = bot.get_channel(SCAN_CHANNEL_ID)
-    download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
-
-    await ctx.send("🔍 Iniciando varredura...")
-
-    async for msg in channel.history(limit=None, oldest_first=True):
-        if cancel_scan:
-            break
-
-        if msg.author.bot:
-            continue
-
-        if date_filter and msg.created_at < date_filter.astimezone(timezone.utc):
-            continue
-
-        await try_download(msg, download_channel)
-        await safe_sleep()
-
-    await ctx.send("✅ Scan finalizado.")
-    scan_running = False
-
-# ========= COMANDOS =========
+# ---------------- COMMANDS ---------------- #
 
 @bot.command()
 async def scan(ctx, *, arg=None):
     if ctx.channel.id != SCAN_CHANNEL_ID:
         return
 
-    date_filter = parse_date_arg(arg)
-    await run_scan(ctx, date_filter)
+    date_filter = None
 
-@bot.command()
-async def cancelscan(ctx):
-    global cancel_scan
-    cancel_scan = True
-    await ctx.send("⛔ Scan cancelado.")
+    if arg:
+        if arg.lower() == "hoje":
+            date_filter = datetime.now(BRAZIL_TZ).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        elif arg.lower() == "ontem":
+            date_filter = datetime.now(BRAZIL_TZ).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1)
+        else:
+            try:
+                d, t = arg.split()
+                date_filter = parse_datetime(d, t)
+            except Exception:
+                await ctx.send("❌ Use: !scan hoje | ontem | DD/MM/AAAA HH:MM")
+                return
 
-@bot.command()
-async def botlimpar(ctx):
-    channel = bot.get_channel(SCAN_CHANNEL_ID)
-    count = 0
+    download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+    await ctx.send("🔍 Iniciando varredura...")
 
-    async for msg in channel.history(limit=300):
-        for reaction in msg.reactions:
-            if reaction.me:
-                await reaction.clear()
-                count += 1
-        await safe_sleep()
+    async for msg in ctx.channel.history(limit=None, oldest_first=True):
+        if date_filter and msg.created_at < date_filter:
+            continue
 
-    await ctx.send(f"🧹 {count} reações do bot removidas.")
-
-@bot.command()
-async def downvideos(ctx, *, arg=None):
-    date_filter = parse_date_arg(arg)
-    source = bot.get_channel(SCAN_CHANNEL_ID)
-    dest = bot.get_channel(DESTINATION_CHANNEL_ID)
-
-    async for msg in source.history(limit=None, oldest_first=True):
-        if msg.attachments:
-            if date_filter and msg.created_at < date_filter.astimezone(timezone.utc):
+        urls = URL_REGEX.findall(msg.content)
+        for url in urls:
+            if url in DOWNLOADED_URLS:
                 continue
 
-            for att in msg.attachments:
-                await dest.send(att.url)
-                await msg.add_reaction("✅")
-                await safe_sleep()
+            await try_download(url, msg, download_channel)
+            await asyncio.sleep(1.2)
 
-# ========= READY =========
+    await ctx.send("✅ Scan finalizado.")
+
+@bot.command()
+async def rescan(ctx, date: str, time: str):
+    if ctx.channel.id != SCAN_CHANNEL_ID:
+        return
+
+    start = parse_datetime(date, time)
+    download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+
+    await ctx.send("🔁 Re-scan iniciado (somente falhas)...")
+
+    for url, meta in list(FAILED_LINKS.items()):
+        if meta["created_at"] < start:
+            continue
+
+        channel = bot.get_channel(meta["channel_id"])
+        if not channel:
+            continue
+
+        try:
+            msg = await channel.fetch_message(meta["message_id"])
+        except:
+            continue
+
+        await try_download(url, msg, download_channel)
+        await asyncio.sleep(1.5)
+
+    await ctx.send("✅ Re-scan concluído.")
+
+# ---------------- EVENTS ---------------- #
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logado como {bot.user}")
-
-# ========= START =========
+    print(f"🤖 Bot conectado como {bot.user}")
 
 bot.run(TOKEN)
