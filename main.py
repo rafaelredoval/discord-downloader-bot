@@ -34,7 +34,7 @@ client = discord.Client(intents=intents)
 # ======================
 URL_REGEX = re.compile(r'https?://\S+')
 DOWNLOAD_BASE = "downloads"
-MAX_SIZE = 8 * 1024 * 1024
+MAX_SIZE = 8 * 1024 * 1024  # 8MB
 LONG_FILE = "long_videos.txt"
 
 downloaded_urls = set()
@@ -47,8 +47,16 @@ def save_long_video(url):
     with open(LONG_FILE, "a", encoding="utf-8") as f:
         f.write(url + "\n")
 
+async def has_reaction(msg, emoji):
+    for r in msg.reactions:
+        if str(r.emoji) == emoji:
+            async for u in r.users():
+                if u == client.user:
+                    return True
+    return False
+
 # ======================
-# DOWNLOAD
+# DOWNLOAD LINKS
 # ======================
 async def try_download(msg, download_channel):
     urls = URL_REGEX.findall(msg.content)
@@ -113,26 +121,46 @@ async def try_download(msg, download_channel):
             await msg.add_reaction("💾")
 
 # ======================
-# SCAN
+# DOWVIDEOS (ANEXOS)
 # ======================
-async def run_scan(trigger_msg, date_filter):
-    global active_scan
-    if active_scan:
-        await trigger_msg.reply("⏳ Scan já em andamento")
-        return
-
-    active_scan = True
+async def run_dowvideos(trigger_msg):
     channel = client.get_channel(SCAN_CHANNEL_ID)
     download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    await trigger_msg.reply("🔍 Iniciando scan...")
+    await trigger_msg.reply("🎥 Procurando vídeos anexados...")
 
-    async for msg in channel.history(after=date_filter, oldest_first=True, limit=None):
-        await try_download(msg, download_channel)
-        await asyncio.sleep(0.6)  # evita rate limit
+    count = 0
 
-    await trigger_msg.reply("✅ Scan finalizado")
-    active_scan = False
+    async for msg in channel.history(after=START_DATE, oldest_first=True, limit=None):
+        if not msg.attachments:
+            continue
+
+        if await has_reaction(msg, "✅"):
+            continue
+
+        for att in msg.attachments:
+            if not att.content_type or not att.content_type.startswith("video"):
+                continue
+
+            if att.size > MAX_SIZE:
+                await msg.add_reaction("🧐")
+                continue
+
+            file_path = f"/tmp/{att.filename}"
+            await att.save(file_path)
+
+            await download_channel.send(
+                content=f"📹 Vídeo de <@{msg.author.id}>",
+                file=discord.File(file_path)
+            )
+
+            os.remove(file_path)
+            await msg.add_reaction("✅")
+            count += 1
+
+        await asyncio.sleep(0.6)
+
+    await trigger_msg.reply(f"✅ `{count}` vídeo(s) enviados")
 
 # ======================
 # CLEAN
@@ -169,6 +197,9 @@ async def on_message(message):
             start = START_DATE
 
         await run_scan(message, start)
+
+    if message.content == "!dowvideos" and message.channel.id == SCAN_CHANNEL_ID:
+        await run_dowvideos(message)
 
     if message.content == "!botlimpar" and message.channel.id == SCAN_CHANNEL_ID:
         await clean_reactions(message.channel)
