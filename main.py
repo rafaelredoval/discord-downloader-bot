@@ -23,7 +23,6 @@ CANCEL_FLAG = False
 def parse_date(text):
     try:
         if text.lower() == "hoje":
-            # Define o início do dia atual (00:00:00) em UTC
             agora = datetime.now(timezone.utc)
             return datetime.combine(agora.date(), time.min).replace(tzinfo=timezone.utc)
         if "/" in text:
@@ -33,7 +32,6 @@ def parse_date(text):
         return None
 
 async def anti_rate():
-    # Pausa para evitar atingir o limite de requisições do Discord
     await asyncio.sleep(1.4)
 
 # ================= FUNÇÕES DE EXECUÇÃO =================
@@ -46,63 +44,44 @@ async def run_downvideos(ctx, start_date=None):
     download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
 
     if not scan_channel or not download_channel:
-        await ctx.send("❌ Erro: IDs dos canais não configuradas corretamente.")
+        await ctx.send("❌ Erro: Canais não configurados corretamente.")
         return
 
-    await ctx.send(f"📥 Coletando vídeos de <#{SCAN_CHANNEL_ID}>...")
+    await ctx.send(f"📥 Movendo vídeos de <#{SCAN_CHANNEL_ID}> para <#{DOWNLOAD_CHANNEL_ID}>...")
 
     async for msg in scan_channel.history(limit=None, oldest_first=True):
-        if CANCEL_FLAG:
-            await ctx.send("🛑 Download cancelado pelo usuário.")
-            return
-
-        # Filtro de data (ex: mensagens enviadas após 00:00 de hoje)
-        if start_date and msg.created_at < start_date:
-            continue
-
-        if not msg.attachments:
-            continue
+        if CANCEL_FLAG: break
+        if start_date and msg.created_at < start_date: continue
+        if not msg.attachments: continue
 
         for att in msg.attachments:
-            # Filtro para garantir que apenas vídeos sejam movidos
-            extensoes_video = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
-            if any(att.filename.lower().endswith(ext) for ext in extensoes_video):
+            if any(att.filename.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi', '.mkv']):
                 try:
-                    # Converte o anexo em um arquivo para o upload
                     arquivo = await att.to_file()
-                    
-                    # Envia para o canal de texto de Download
-                    await download_channel.send(
-                        content=f"🎬 Vídeo de: {msg.author.mention}", 
-                        file=arquivo
-                    )
-                    
-                    # Reação no canal SCAN para marcar como concluído
-                    await msg.add_reaction("📥")
-                except Exception as e:
-                    print(f"Erro ao mover arquivo: {e}")
-                
+                    await download_channel.send(content=f"🎬 Vídeo de: {msg.author.mention}", file=arquivo)
+                    await msg.add_reaction("✅") # Reage no SCAN
+                except:
+                    await msg.add_reaction("❌")
                 await anti_rate()
+    await ctx.send("✅ !downvideos finalizado.")
 
-    await ctx.send("✅ Comando `!downvideos` finalizado com sucesso.")
-
-async def run_scan_post(ctx, start_date=None):
+async def run_scan_link(ctx, start_date=None):
+    """Função para o comando !scan link: Baixa do Download e posta no Fórum"""
     global CANCEL_FLAG
     CANCEL_FLAG = False
     
     download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
     post_channel = bot.get_channel(POST_CHANNEL_ID)
 
-    await ctx.send("📦 Iniciando postagens no Fórum...")
+    await ctx.send(f"🚀 Iniciando `!scan link` para o Fórum...")
     
     async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG: break
         if start_date and msg.created_at < start_date: continue
         if not msg.attachments: continue
 
-        # Define o título do tópico no fórum
+        # Título baseado na menção do usuário
         if msg.mentions:
-            # Usa o nome legível da primeira pessoa mencionada
             thread_title = f"@{msg.mentions[0].display_name}"
         else:
             thread_title = f"Post de {msg.author.display_name}"
@@ -113,59 +92,61 @@ async def run_scan_post(ctx, start_date=None):
             try:
                 arquivo = await att.to_file()
                 
-                # Se o destino for um Fórum, cria um novo tópico (Thread)
                 if isinstance(post_channel, discord.ForumChannel):
                     await post_channel.create_thread(name=thread_title, content=header, file=arquivo)
                 else:
-                    # Se for canal de texto comum, apenas envia a mensagem
                     await post_channel.send(content=f"**{thread_title}**\n{header}", file=arquivo)
                 
+                # REAÇÃO DE VERIFICADO: Reage na mensagem do canal de Download
                 await msg.add_reaction("✅")
             except:
                 await msg.add_reaction("🧐")
             
             await anti_rate()
             
-    await ctx.send("✅ Scan Post finalizado!")
+    await ctx.send("✅ !scan link finalizado!")
 
 # ================= COMANDOS =================
 
 @bot.command()
 async def downvideos(ctx, *, arg=None):
-    """Varre o canal SCAN e move vídeos para o canal de DOWNLOAD (Texto)."""
-    if ctx.channel.id != SCAN_CHANNEL_ID: 
-        return
-    
+    if ctx.channel.id != SCAN_CHANNEL_ID: return
     date = parse_date(arg) if arg else None
     await run_downvideos(ctx, date)
 
 @bot.command()
 async def scan(ctx, *, arg=None):
-    """Varre o canal DOWNLOAD e posta no FÓRUM."""
-    if ctx.channel.id != SCAN_CHANNEL_ID: 
+    """
+    Uso: 
+    !scan post [hoje/data] -> Antigo
+    !scan link [hoje/data] -> Novo (baixa e reage com tick)
+    """
+    if ctx.channel.id != SCAN_CHANNEL_ID: return
+    if not arg:
+        await ctx.send("ℹ️ Use `!scan link hoje` ou `!scan link DD/MM/AAAA`")
         return
-        
-    if arg and arg.startswith("post"):
-        date = None
-        parts = arg.split(" ", 1)
-        if len(parts) == 2:
-            date = parse_date(parts[1])
-        await run_scan_post(ctx, date)
-    else:
-        await ctx.send("ℹ️ Use `!scan post` ou `!scan post hoje`")
+
+    # Lógica para separar "link" ou "post" do restante do argumento (data)
+    parts = arg.split(" ", 1)
+    comando_tipo = parts[0].lower()
+    data_str = parts[1] if len(parts) > 1 else None
+    date = parse_date(data_str) if data_str else None
+
+    if comando_tipo == "link":
+        await run_scan_link(ctx, date)
+    elif comando_tipo == "post":
+        # Mantido para compatibilidade, faz o mesmo que o link agora
+        await run_scan_link(ctx, date)
 
 @bot.command()
 async def cancelgeral(ctx):
-    """Interrompe qualquer processo em execução."""
     global CANCEL_FLAG
     CANCEL_FLAG = True
-    await ctx.send("🛑 Cancelamento solicitado. O bot irá parar após concluir a subida atual.")
-
-# ================= READY =================
+    await ctx.send("🛑 Cancelamento ativado.")
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot conectado com sucesso como {bot.user}")
+    print(f"✅ Bot Online: {bot.user}")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
