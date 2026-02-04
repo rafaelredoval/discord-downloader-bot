@@ -18,7 +18,7 @@ TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
-intents.members = True # Importante para resolver nomes de usuários
+intents.members = True # Lembre-se de ativar "Server Members Intent" no Developer Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -47,10 +47,10 @@ async def run_scan_post(ctx, start_date=None):
     post_channel = bot.get_channel(POST_CHANNEL_ID)
 
     if not download_channel or not post_channel:
-        await ctx.send("❌ Erro: Canais não encontrados.")
+        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs.")
         return
 
-    await ctx.send("📦 Coletando mídias e convertendo menções em nomes...")
+    await ctx.send("📦 Coletando mídias e identificando usuários...")
 
     async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG:
@@ -63,18 +63,13 @@ async def run_scan_post(ctx, start_date=None):
         if not msg.attachments:
             continue
 
-        # --- LÓGICA PARA O TÍTULO SEM NÚMEROS ---
-        # Verificamos se há usuários mencionados na mensagem
+        # Lógica para o título: Prioriza o @nome mencionado, senão usa o nome de quem postou
         if msg.mentions:
-            # Pega o nome de exibição do primeiro usuário mencionado
             thread_title = f"@{msg.mentions[0].display_name}"
         elif msg.content and len(msg.content.strip()) > 0:
-            # Se não for menção mas tiver texto, limpa possíveis IDs de canais/cargos
-            # Pega a primeira linha e remove caracteres de menção bruta <@...>
             clean_text = discord.utils.remove_markdown(msg.content.split('\n')[0])
             thread_title = clean_text[:95] if clean_text else f"Post de {msg.author.display_name}"
         else:
-            # Caso padrão: nome de quem postou
             thread_title = f"Post de {msg.author.display_name}"
 
         header = f"🎬 Vídeo enviado por: **{msg.author.display_name}**"
@@ -83,6 +78,7 @@ async def run_scan_post(ctx, start_date=None):
             try:
                 file = await att.to_file()
                 
+                # Verifica se o destino é um Fórum ou canal de texto
                 if isinstance(post_channel, discord.ForumChannel):
                     await post_channel.create_thread(name=thread_title, content=header, file=file)
                 else:
@@ -98,7 +94,7 @@ async def run_scan_post(ctx, start_date=None):
                     await post_channel.send(content=error_content)
                 
                 await msg.add_reaction("🧐")
-                print(f"Erro no anexo: {e}")
+                print(f"Erro no processamento: {e}")
 
             await anti_rate()
 
