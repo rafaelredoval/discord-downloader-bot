@@ -1,7 +1,6 @@
 import discord
 import asyncio
 import os
-import re
 from discord.ext import commands
 from datetime import datetime, timezone
 
@@ -19,6 +18,7 @@ TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+intents.members = True # Importante para resolver nomes de usuários
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -47,10 +47,10 @@ async def run_scan_post(ctx, start_date=None):
     post_channel = bot.get_channel(POST_CHANNEL_ID)
 
     if not download_channel or not post_channel:
-        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs.")
+        await ctx.send("❌ Erro: Canais não encontrados.")
         return
 
-    await ctx.send("📦 Coletando mídias e identificando usuários...")
+    await ctx.send("📦 Coletando mídias e convertendo menções em nomes...")
 
     async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG:
@@ -63,28 +63,27 @@ async def run_scan_post(ctx, start_date=None):
         if not msg.attachments:
             continue
 
-        # --- LÓGICA PARA O TÍTULO ---
-        # Tenta pegar o texto da mensagem (o @ ou legenda)
-        # Se a mensagem tiver texto, usamos os primeiros 40 caracteres como título
-        # Se não tiver texto, usamos o nome de quem enviou o arquivo
-        if msg.content and len(msg.content.strip()) > 0:
-            # Remove marcações de menção para o título não ficar com IDs estranhos, 
-            # ou mantém se preferir o texto puro. 
-            # Aqui vamos usar o texto que o usuário digitou:
-            titulo_base = msg.content.split('\n')[0] # Pega apenas a primeira linha
-            thread_title = (titulo_base[:95]) # Limite de caracteres do título do Discord
+        # --- LÓGICA PARA O TÍTULO SEM NÚMEROS ---
+        # Verificamos se há usuários mencionados na mensagem
+        if msg.mentions:
+            # Pega o nome de exibição do primeiro usuário mencionado
+            thread_title = f"@{msg.mentions[0].display_name}"
+        elif msg.content and len(msg.content.strip()) > 0:
+            # Se não for menção mas tiver texto, limpa possíveis IDs de canais/cargos
+            # Pega a primeira linha e remove caracteres de menção bruta <@...>
+            clean_text = discord.utils.remove_markdown(msg.content.split('\n')[0])
+            thread_title = clean_text[:95] if clean_text else f"Post de {msg.author.display_name}"
         else:
+            # Caso padrão: nome de quem postou
             thread_title = f"Post de {msg.author.display_name}"
 
-        author_name = msg.author.display_name
-        header = f"🎬 Vídeo enviado por: **{author_name}**"
+        header = f"🎬 Vídeo enviado por: **{msg.author.display_name}**"
 
         for att in msg.attachments:
             try:
                 file = await att.to_file()
                 
                 if isinstance(post_channel, discord.ForumChannel):
-                    # Cria o post no fórum com o texto da mensagem como título
                     await post_channel.create_thread(name=thread_title, content=header, file=file)
                 else:
                     await post_channel.send(content=f"**{thread_title}**\n{header}", file=file)
@@ -99,7 +98,7 @@ async def run_scan_post(ctx, start_date=None):
                     await post_channel.send(content=error_content)
                 
                 await msg.add_reaction("🧐")
-                print(f"Erro: {e}")
+                print(f"Erro no anexo: {e}")
 
             await anti_rate()
 
