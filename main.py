@@ -3,290 +3,223 @@ import os
 import re
 import asyncio
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 
-# ======================
-# DISCORD CONFIG
-# ======================
+# =====================
+# ENV
+# =====================
+TOKEN = os.getenv("DISCORD_TOKEN")
+SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID", "0"))
+DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", "0"))
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN não definido")
+
+# =====================
+# DISCORD
+# =====================
 intents = discord.Intents.default()
 intents.message_content = True
-intents.messages = True
-intents.reactions = True
-
 client = discord.Client(intents=intents)
 
-# ======================
-# ENV (Railway / Host)
-# ======================
-TOKEN = os.getenv("DISCORD_TOKEN")
-SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))
-DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID"))
+URL_REGEX = re.compile(r'https?://\S+')
+BOT_REACTIONS = ["✅", "❌", "🧐", "💾"]
 
-URL_REGEX = re.compile(r"https?://\S+")
+DOWNLOAD_BASE = "downloads"
+MAX_MESSAGES = 500
+SLEEP_TIME = 1.2
 
-# ======================
-# CONTROLE GLOBAL
-# ======================
-CANCEL_SCAN = False
+cancel_flag = False
+failed_links = set()
+processed_links = set()
+long_videos = []
 
-# ======================
-# DATETIME PARSER
-# ======================
-def parse_datetime(text):
-    if not text:
+# =====================
+# HELPERS
+# =====================
+def parse_date(arg: str | None):
+    if not arg:
         return None
 
-    text = text.lower().strip()
+    arg = arg.lower()
+
     now = datetime.now(timezone.utc)
 
-    if text == "hoje":
-        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if arg == "hoje":
+        return now.replace(hour=0, minute=0, second=0)
 
-    if text == "ontem":
-        return (now - timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+    if arg == "ontem":
+        y = now - timedelta(days=1)
+        return y.replace(hour=0, minute=0, second=0)
 
-    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y"):
+    for fmt in ("%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(text, fmt)
-            return dt.replace(tzinfo=timezone.utc)
-        except ValueError:
+            return datetime.strptime(arg, fmt).replace(tzinfo=timezone.utc)
+        except:
             pass
 
-    return None
+    raise ValueError("Formato de data inválido")
 
-# ======================
-# SAFE HISTORY
-# ======================
-async def safe_history(channel):
-    async for msg in channel.history(limit=None, oldest_first=True):
+async def safe_history(channel, after):
+    async for msg in channel.history(after=after, limit=None, oldest_first=True):
         yield msg
-        await asyncio.sleep(0.35)  # evita rate-limit
+        await asyncio.sleep(0.35)
 
-# ======================
-# DOWNLOAD LINKS
-# ======================
+# =====================
+# DOWNLOAD
+# =====================
 async def try_download(msg, download_channel):
     urls = URL_REGEX.findall(msg.content)
     if not urls:
         return False
 
-    success = True
+    ok_any = False
 
     for url in urls:
+        if url in processed_links:
+            continue
+
+        processed_links.add(url)
+        print(f"[DOWNLOAD] {url}")
+
         try:
-            result = subprocess.run(
-                ["yt-dlp", "-f", "mp4", "-o", "temp.%(ext)s", url],
-                capture_output=True,
-                text=True,
-                timeout=300
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "-o", f"{DOWNLOAD_BASE}/%(title)s.%(ext)s",
+                "--max-filesize", "50M",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
+            await proc.communicate()
 
-            if result.returncode != 0:
-                raise Exception("yt-dlp erro")
+            if proc.returncode != 0:
+                raise RuntimeError("yt-dlp falhou")
 
-            file_name = next(
-                (f for f in os.listdir(".") if f.startswith("temp.")),
-                None
-            )
-
-            if not file_name:
-                raise Exception("arquivo não encontrado")
-
-            await download_channel.send(
-                content=f"📥 <@{msg.author.id}>\n{url}",
-                file=discord.File(file_name)
-            )
-
-            os.remove(file_name)
+            await msg.add_reaction("✅")
+            ok_any = True
 
         except Exception:
-            success = False
-            try:
-                await msg.add_reaction("❌")
-            except:
-                pass
+            failed_links.add(url)
+            await msg.add_reaction("🧐")
+            await download_channel.send(f"🧐 Falha no download:\n{url}")
 
-            await download_channel.send(f"🧐 Falha ao baixar:\n{url}")
+        await asyncio.sleep(SLEEP_TIME)
 
-    if success:
-        try:
-            await msg.add_reaction("✅")
-        except:
-            pass
+    return ok_any
 
-    return success
-
-# ======================
-# SCAN / RESCAN
-# ======================
-async def run_scan(origin_msg, start_date=None):
-    global CANCEL_SCAN
-    CANCEL_SCAN = False
+# =====================
+# SCAN
+# =====================
+async def run_scan(message, start_date):
+    global cancel_flag
+    cancel_flag = False
 
     scan_channel = client.get_channel(SCAN_CHANNEL_ID)
     download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    total = ok = fail = 0
-
-    async for msg in safe_history(scan_channel):
-        if CANCEL_SCAN:
-            await origin_msg.channel.send("🛑 Scan cancelado")
-            return
-
-        if msg.author.bot:
-            continue
-
-        if start_date and msg.created_at < start_date:
-            continue
-
-        total += 1
-        result = await try_download(msg, download_channel)
-
-        if result:
-            ok += 1
-        else:
-            fail += 1
-
-    await origin_msg.channel.send(
-        f"✅ **Scan finalizado**\n"
-        f"📨 {total} mensagens\n"
-        f"✔️ {ok} sucesso\n"
-        f"❌ {fail} falhas"
-    )
-
-# ======================
-# DOWNVIDEOS (UPLOADS)
-# ======================
-async def run_downvideos(origin_msg, start_date=None):
-    global CANCEL_SCAN
-    CANCEL_SCAN = False
-
-    source_channel = origin_msg.channel
-    download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
+    await message.channel.send("🔎 Iniciando varredura…")
 
     count = 0
 
-    async for msg in safe_history(source_channel):
-        if CANCEL_SCAN:
-            await origin_msg.channel.send("🛑 downvideos cancelado")
-            return
+    async for msg in safe_history(scan_channel, start_date):
+        if cancel_flag:
+            break
 
         if msg.author.bot:
             continue
 
-        if start_date and msg.created_at < start_date:
-            continue
+        await try_download(msg, download_channel)
 
-        videos = [
-            a for a in msg.attachments
-            if a.content_type and a.content_type.startswith("video")
-        ]
+        count += 1
+        if count % 10 == 0:
+            print(f"[SCAN] Processadas {count}")
 
-        for video in videos:
-            try:
-                await download_channel.send(
-                    content=f"📦 <@{msg.author.id}>",
-                    file=await video.to_file()
-                )
-                count += 1
-            except:
-                pass
+        if count >= MAX_MESSAGES:
+            break
 
-        if videos:
-            try:
-                await msg.add_reaction("✅")
-            except:
-                pass
+    await message.channel.send("✅ Scan finalizado")
 
-    await origin_msg.channel.send(
-        f"📥 **downvideos concluído** — {count} vídeos enviados"
-    )
+# =====================
+# DOWNVIDEOS
+# =====================
+async def run_downvideos(message, start_date):
+    scan_channel = client.get_channel(SCAN_CHANNEL_ID)
+    download_channel = client.get_channel(DOWNLOAD_CHANNEL_ID)
 
-# ======================
-# BOTLIMPAR
-# ======================
-async def run_botlimpar(channel, emoji):
-    removed = 0
+    await message.channel.send("📦 Coletando vídeos…")
 
-    async for msg in safe_history(channel):
+    count = 0
+
+    async for msg in safe_history(scan_channel, start_date):
+        if msg.attachments:
+            for att in msg.attachments:
+                if att.content_type and "video" in att.content_type:
+                    print(f"[DOWNVIDEOS] {att.filename}")
+                    await download_channel.send(file=await att.to_file())
+                    await msg.add_reaction("✅")
+                    await asyncio.sleep(SLEEP_TIME)
+
+        count += 1
+        if count >= MAX_MESSAGES:
+            break
+
+    await message.channel.send("✅ downvideos finalizado")
+
+# =====================
+# CLEAN
+# =====================
+async def clean_reactions(message):
+    channel = client.get_channel(SCAN_CHANNEL_ID)
+    async for msg in channel.history(limit=200):
         for reaction in msg.reactions:
-            if reaction.me and str(reaction.emoji) == emoji:
-                try:
-                    await msg.clear_reaction(emoji)
-                    removed += 1
-                except:
-                    pass
+            if reaction.me:
+                await reaction.clear()
 
-    await channel.send(f"🧹 {removed} reações `{emoji}` removidas")
+    await message.channel.send("🧹 Reações do bot removidas")
 
-# ======================
+# =====================
 # EVENTS
-# ======================
+# =====================
 @client.event
 async def on_ready():
-    print(f"✅ Bot online como {client.user}")
+    print(f"✅ Conectado como {client.user}")
 
 @client.event
 async def on_message(message):
-    global CANCEL_SCAN
+    global cancel_flag
 
     if message.author.bot:
         return
 
-    content = message.content.strip()
-
-    if content.startswith("!cancelgeral"):
-        CANCEL_SCAN = True
-        await message.channel.send("🛑 Cancelamento geral ativado")
+    if not message.content.startswith("!"):
         return
 
-    if content.startswith("!scan"):
-        arg = content.replace("!scan", "").strip()
-        start = parse_datetime(arg)
+    cmd, *args = message.content.split(maxsplit=1)
+    arg = args[0] if args else None
 
-        if arg and not start:
-            await message.channel.send(
-                "❌ Use: `!scan hoje | ontem | DD/MM/YYYY | DD/MM/YYYY HH:MM`"
-            )
-            return
+    try:
+        if cmd == "!scan":
+            await run_scan(message, parse_date(arg))
 
-        await message.channel.send("🔍 Scan iniciado…")
-        await run_scan(message, start)
+        elif cmd == "!rescan":
+            await run_scan(message, parse_date(arg))
 
-    elif content.startswith("!rescan"):
-        arg = content.replace("!rescan", "").strip()
-        start = parse_datetime(arg)
+        elif cmd == "!downvideos":
+            await run_downvideos(message, parse_date(arg))
 
-        if not start:
-            await message.channel.send(
-                "❌ Use: `!rescan DD/MM/YYYY HH:MM`"
-            )
-            return
+        elif cmd == "!botlimpar":
+            await clean_reactions(message)
 
-        await message.channel.send("♻️ Re-scan iniciado…")
-        await run_scan(message, start)
+        elif cmd == "!cancelgeral":
+            cancel_flag = True
+            await message.channel.send("⛔ Scan cancelado")
 
-    elif content.startswith("!downvideos"):
-        arg = content.replace("!downvideos", "").strip()
-        start = parse_datetime(arg)
+    except Exception as e:
+        await message.channel.send(f"❌ Erro: {e}")
+        print(e)
 
-        if arg and not start:
-            await message.channel.send(
-                "❌ Use: `!downvideos hoje | ontem | DD/MM/YYYY HH:MM`"
-            )
-            return
-
-        await message.channel.send("📦 Coletando vídeos…")
-        await run_downvideos(message, start)
-
-    elif content.startswith("!botlimpar"):
-        parts = content.split()
-        emoji = parts[1] if len(parts) > 1 else "✅"
-        await run_botlimpar(message.channel, emoji)
-
-# ======================
+# =====================
 # START
-# ======================
+# =====================
 client.run(TOKEN)
