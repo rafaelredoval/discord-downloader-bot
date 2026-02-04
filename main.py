@@ -1,6 +1,7 @@
 import discord
 import asyncio
 import os
+import re
 from discord.ext import commands
 from datetime import datetime, timezone
 
@@ -46,10 +47,10 @@ async def run_scan_post(ctx, start_date=None):
     post_channel = bot.get_channel(POST_CHANNEL_ID)
 
     if not download_channel or not post_channel:
-        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs no Railway.")
+        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs.")
         return
 
-    await ctx.send("📦 Coletando mídias do canal de download...")
+    await ctx.send("📦 Coletando mídias e identificando usuários...")
 
     async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG:
@@ -62,35 +63,43 @@ async def run_scan_post(ctx, start_date=None):
         if not msg.attachments:
             continue
 
+        # --- LÓGICA PARA O TÍTULO ---
+        # Tenta pegar o texto da mensagem (o @ ou legenda)
+        # Se a mensagem tiver texto, usamos os primeiros 40 caracteres como título
+        # Se não tiver texto, usamos o nome de quem enviou o arquivo
+        if msg.content and len(msg.content.strip()) > 0:
+            # Remove marcações de menção para o título não ficar com IDs estranhos, 
+            # ou mantém se preferir o texto puro. 
+            # Aqui vamos usar o texto que o usuário digitou:
+            titulo_base = msg.content.split('\n')[0] # Pega apenas a primeira linha
+            thread_title = (titulo_base[:95]) # Limite de caracteres do título do Discord
+        else:
+            thread_title = f"Post de {msg.author.display_name}"
+
         author_name = msg.author.display_name
-        data_formatada = msg.created_at.strftime('%d/%m/%Y %H:%M')
         header = f"🎬 Vídeo enviado por: **{author_name}**"
-        
-        # Título caso o destino seja um Fórum
-        thread_title = f"Post de {author_name} - {data_formatada}"
 
         for att in msg.attachments:
             try:
                 file = await att.to_file()
                 
-                # Lógica para Fórum vs Canal de Texto
                 if isinstance(post_channel, discord.ForumChannel):
+                    # Cria o post no fórum com o texto da mensagem como título
                     await post_channel.create_thread(name=thread_title, content=header, file=file)
                 else:
-                    await post_channel.send(content=header, file=file)
+                    await post_channel.send(content=f"**{thread_title}**\n{header}", file=file)
                 
                 await msg.add_reaction("✅")
             except Exception as e:
-                # Caso o arquivo seja muito grande (>25MB), envia apenas o link
-                error_content = f"{header}\n🔗 Link da mídia: {att.url}\n⚠️ (Arquivo muito grande ou erro no upload)"
+                error_content = f"**{thread_title}**\n{header}\n🔗 Link: {att.url}"
                 
                 if isinstance(post_channel, discord.ForumChannel):
-                    await post_channel.create_thread(name=f"Link: {author_name}", content=error_content)
+                    await post_channel.create_thread(name=f"Link: {thread_title}", content=error_content)
                 else:
                     await post_channel.send(content=error_content)
                 
                 await msg.add_reaction("🧐")
-                print(f"Erro ao processar anexo: {e}")
+                print(f"Erro: {e}")
 
             await anti_rate()
 
