@@ -45,7 +45,11 @@ async def run_scan_post(ctx, start_date=None):
     download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
     post_channel = bot.get_channel(POST_CHANNEL_ID)
 
-    await ctx.send("📦 Coletando vídeos do canal de download…")
+    if not download_channel or not post_channel:
+        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs no Railway.")
+        return
+
+    await ctx.send("📦 Coletando mídias do canal de download...")
 
     async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG:
@@ -59,16 +63,34 @@ async def run_scan_post(ctx, start_date=None):
             continue
 
         author_name = msg.author.display_name
+        data_formatada = msg.created_at.strftime('%d/%m/%Y %H:%M')
         header = f"🎬 Vídeo enviado por: **{author_name}**"
+        
+        # Título caso o destino seja um Fórum
+        thread_title = f"Post de {author_name} - {data_formatada}"
 
         for att in msg.attachments:
             try:
                 file = await att.to_file()
-                await post_channel.send(content=header, file=file)
+                
+                # Lógica para Fórum vs Canal de Texto
+                if isinstance(post_channel, discord.ForumChannel):
+                    await post_channel.create_thread(name=thread_title, content=header, file=file)
+                else:
+                    await post_channel.send(content=header, file=file)
+                
                 await msg.add_reaction("✅")
-            except:
-                await post_channel.send(f"{header}\n{att.url}")
+            except Exception as e:
+                # Caso o arquivo seja muito grande (>25MB), envia apenas o link
+                error_content = f"{header}\n🔗 Link da mídia: {att.url}\n⚠️ (Arquivo muito grande ou erro no upload)"
+                
+                if isinstance(post_channel, discord.ForumChannel):
+                    await post_channel.create_thread(name=f"Link: {author_name}", content=error_content)
+                else:
+                    await post_channel.send(content=error_content)
+                
                 await msg.add_reaction("🧐")
+                print(f"Erro ao processar anexo: {e}")
 
             await anti_rate()
 
@@ -104,4 +126,5 @@ async def cancelgeral(ctx):
 async def on_ready():
     print(f"✅ Bot conectado como {bot.user}")
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)
