@@ -18,7 +18,7 @@ TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
-intents.members = True 
+intents.members = True # Lembre-se de ativar "Server Members Intent" no Developer Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -37,24 +37,24 @@ def parse_date(text):
 async def anti_rate():
     await asyncio.sleep(1.4)
 
-# ================= LÓGICA DE DOWNLOAD/MOVE =================
+# ================= SCAN POST =================
 
-async def run_downvideos(ctx, start_date=None):
+async def run_scan_post(ctx, start_date=None):
     global CANCEL_FLAG
     CANCEL_FLAG = False
 
-    scan_channel = bot.get_channel(SCAN_CHANNEL_ID)
     download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+    post_channel = bot.get_channel(POST_CHANNEL_ID)
 
-    if not scan_channel or not download_channel:
-        await ctx.send("❌ Erro: Canais de Scan ou Download não encontrados.")
+    if not download_channel or not post_channel:
+        await ctx.send("❌ Erro: Canais não encontrados. Verifique as IDs.")
         return
 
-    await ctx.send(f"📥 Iniciando coleta de vídeos em <#{SCAN_CHANNEL_ID}>...")
+    await ctx.send("📦 Coletando mídias e identificando usuários...")
 
-    async for msg in scan_channel.history(limit=None, oldest_first=True):
+    async for msg in download_channel.history(limit=None, oldest_first=True):
         if CANCEL_FLAG:
-            await ctx.send("🛑 Comando !downvideos cancelado.")
+            await ctx.send("🛑 Scan post cancelado")
             return
 
         if start_date and msg.created_at < start_date:
@@ -63,41 +63,44 @@ async def run_downvideos(ctx, start_date=None):
         if not msg.attachments:
             continue
 
-        # Identifica quem enviou o vídeo original
-        author_mention = msg.author.mention
-        content_with_mention = f"Enviado por: {author_mention}"
+        # Lógica para o título: Prioriza o @nome mencionado, senão usa o nome de quem postou
+        if msg.mentions:
+            thread_title = f"@{msg.mentions[0].display_name}"
+        elif msg.content and len(msg.content.strip()) > 0:
+            clean_text = discord.utils.remove_markdown(msg.content.split('\n')[0])
+            thread_title = clean_text[:95] if clean_text else f"Post de {msg.author.display_name}"
+        else:
+            thread_title = f"Post de {msg.author.display_name}"
+
+        header = f"🎬 Vídeo enviado por: **{msg.author.display_name}**"
 
         for att in msg.attachments:
-            # Filtra apenas extensões de vídeo comuns
-            if any(att.filename.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi', '.mkv']):
-                try:
-                    file = await att.to_file()
-                    # Envia para o canal de download mantendo o @ do autor no corpo da mensagem
-                    await download_channel.send(content=content_with_mention, file=file)
-                    await msg.add_reaction("📥") # Reação para indicar que foi processado
-                except Exception as e:
-                    await ctx.send(f"⚠️ Erro ao mover vídeo de {msg.author.display_name}: {e}")
+            try:
+                file = await att.to_file()
                 
-                await anti_rate()
+                # Verifica se o destino é um Fórum ou canal de texto
+                if isinstance(post_channel, discord.ForumChannel):
+                    await post_channel.create_thread(name=thread_title, content=header, file=file)
+                else:
+                    await post_channel.send(content=f"**{thread_title}**\n{header}", file=file)
+                
+                await msg.add_reaction("✅")
+            except Exception as e:
+                error_content = f"**{thread_title}**\n{header}\n🔗 Link: {att.url}"
+                
+                if isinstance(post_channel, discord.ForumChannel):
+                    await post_channel.create_thread(name=f"Link: {thread_title}", content=error_content)
+                else:
+                    await post_channel.send(content=error_content)
+                
+                await msg.add_reaction("🧐")
+                print(f"Erro no processamento: {e}")
 
-    await ctx.send("✅ Todos os vídeos foram movidos para o canal de download.")
+            await anti_rate()
+
+    await ctx.send("✅ Scan post finalizado")
 
 # ================= COMANDOS =================
-
-@bot.command()
-async def downvideos(ctx, *, date_str=None):
-    """Varre o canal SCAN e move os vídeos para o canal DOWNLOAD."""
-    if ctx.channel.id != SCAN_CHANNEL_ID:
-        return
-
-    date = None
-    if date_str:
-        date = parse_date(date_str)
-        if not date:
-            await ctx.send("❌ Formato de data inválido. Use `DD/MM/AAAA HH:MM` ou `AAAA-MM-DD`.")
-            return
-
-    await run_downvideos(ctx, date)
 
 @bot.command()
 async def scan(ctx, *, arg=None):
@@ -110,15 +113,10 @@ async def scan(ctx, *, arg=None):
         if len(parts) == 2:
             date = parse_date(parts[1])
 
-        # Importante: run_scan_post deve estar definido conforme as interações anteriores
-        try:
-            from main import run_scan_post
-            await run_scan_post(ctx, date)
-        except:
-            await ctx.send("⚠️ Erro ao chamar a função de scan post.")
+        await run_scan_post(ctx, date)
         return
 
-    await ctx.send("ℹ️ Use `!scan post` ou `!downvideos [DATA]`")
+    await ctx.send("ℹ️ Use `!scan post` ou `!scan post DD/MM/AAAA HH:MM`")
 
 @bot.command()
 async def cancelgeral(ctx):
