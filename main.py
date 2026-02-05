@@ -7,7 +7,7 @@ from io import BytesIO
 from discord.ext import commands
 from datetime import datetime, timezone, time
 
-# Tenta carregar o .env apenas localmente
+# Tenta carregar o .env localmente
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -49,62 +49,17 @@ def parse_date(text):
 async def anti_rate():
     await asyncio.sleep(1.4)
 
-# --- Comandos de Movimentação ---
-
-@bot.command()
-async def downvideos(ctx, *, arg=None):
-    global CANCEL_FLAG
-    CANCEL_FLAG = False
-    date = parse_date(arg)
-    scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
-    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
-    
-    await ctx.send(f"📥 Coletando vídeos em <#{SCAN_CHANNEL_ID}>...")
-    async for msg in scan_ch.history(limit=None, oldest_first=True):
-        if CANCEL_FLAG: break
-        if date and msg.created_at < date: continue
-        if not msg.attachments: continue
-        for att in msg.attachments:
-            if any(att.filename.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']):
-                try:
-                    file = await att.to_file()
-                    await down_ch.send(content=f"🎬 Vídeo de: {msg.author.mention}", file=file)
-                    await msg.add_reaction("✅")
-                except: await msg.add_reaction("❌")
-                await anti_rate()
-    await ctx.send("✅ !downvideos finalizado.")
-
-@bot.command()
-async def link(ctx, *, arg=None):
-    global CANCEL_FLAG
-    CANCEL_FLAG = False
-    date = parse_date(arg)
-    scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
-    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
-    await ctx.send("🔗 Capturando links...")
-    async for msg in scan_ch.history(limit=None, oldest_first=True):
-        if CANCEL_FLAG: break
-        if date and msg.created_at < date: continue
-        links = re.findall(URL_PATTERN, msg.content)
-        if links:
-            try:
-                await down_ch.send(content=f"🔗 **Link de:** {msg.author.mention}\n" + "\n".join(links))
-                await msg.add_reaction("✅")
-            except: await msg.add_reaction("❌")
-            await anti_rate()
-    await ctx.send("✅ !link finalizado.")
-
-# --- Comando LINKS DOWNLOAD (Agora com menção do usuário original) ---
+# ================= COMANDOS =================
 
 @bot.command()
 async def linksdownload(ctx, *, arg=None):
-    """Baixa o vídeo do link e envia mencionando o usuário da mensagem original"""
+    """Baixa o vídeo, força o player do Discord e menciona o alvo"""
     global CANCEL_FLAG
     CANCEL_FLAG = False
     date = parse_date(arg)
     down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
     
-    await ctx.send(f"💾 Baixando vídeos dos links em <#{DOWNLOAD_CHANNEL_ID}>...")
+    await ctx.send(f"💾 Baixando vídeos e gerando player em <#{DOWNLOAD_CHANNEL_ID}>...")
     
     async with aiohttp.ClientSession() as session:
         async for msg in down_ch.history(limit=None, oldest_first=True):
@@ -114,7 +69,7 @@ async def linksdownload(ctx, *, arg=None):
             links = re.findall(URL_PATTERN, msg.content)
             if not links: continue
 
-            # Identifica quem deve ser mencionado (quem foi marcado na mensagem ou o autor)
+            # Define quem mencionar
             mention_target = msg.mentions[0].mention if msg.mentions else msg.author.mention
 
             for url in links:
@@ -123,20 +78,20 @@ async def linksdownload(ctx, *, arg=None):
                         if resp.status == 200:
                             data = await resp.read()
                             
-                            # Verificação de tamanho (25MB limite Discord)
+                            # Limite de 25MB (padrão Railway/Discord Free)
                             if len(data) > 25 * 1024 * 1024:
-                                await msg.add_reaction("❌") # Muito grande
+                                await msg.add_reaction("❌")
                                 continue
                             
-                            # Tenta extrair um nome de arquivo
-                            filename = url.split("/")[-1].split("?")[0] or "video_extraido.mp4"
-                            if "." not in filename: filename += ".mp4"
+                            # FORÇAR EXTENSÃO .MP4 PARA GERAR PLAYER
+                            # Remove parâmetros de URL e garante o .mp4 no final
+                            filename = "video_player.mp4" 
 
                             file_data = BytesIO(data)
                             d_file = discord.File(file_data, filename=filename)
                             
                             await down_ch.send(
-                                content=f"💾 **Vídeo completo baixado para:** {mention_target}",
+                                content=f"🎬 **Vídeo pronto para reprodução:** {mention_target}",
                                 file=d_file
                             )
                             await msg.add_reaction("💾")
@@ -145,63 +100,37 @@ async def linksdownload(ctx, *, arg=None):
                 except:
                     await msg.add_reaction("❌")
                 await anti_rate()
-                
-    await ctx.send("✅ !linksdownload finalizado.")
-
-# --- Comandos de Fórum e Limpeza ---
+    await ctx.send("✅ Finalizado.")
 
 @bot.command()
-async def scan(ctx, *, arg=None):
-    if not arg or "link" not in arg.lower():
-        await ctx.send("ℹ️ Use `!scan link hoje` ou data")
+async def limpar(ctx, emoji_alvo=None, *, arg=None):
+    """Remove reações específicas das mensagens"""
+    if not ctx.author.guild_permissions.manage_messages:
+        await ctx.send("❌ Sem permissão para gerenciar mensagens.")
         return
-    global CANCEL_FLAG
-    CANCEL_FLAG = False
-    data_str = arg.lower().replace("link", "").strip()
-    date = parse_date(data_str)
-    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
-    forum_ch = bot.get_channel(POST_CHANNEL_ID)
 
-    await ctx.send("🚀 Postando no Fórum...")
-    async for msg in down_ch.history(limit=None, oldest_first=True):
-        if CANCEL_FLAG: break
-        if date and msg.created_at < date: continue
-        if not msg.attachments: continue
-        title = f"@{msg.mentions[0].display_name}" if msg.mentions else f"Post de {msg.author.display_name}"
-        for att in msg.attachments:
-            try:
-                file = await att.to_file()
-                content = f"🎬 Enviado por: **{msg.author.display_name}**"
-                if isinstance(forum_ch, discord.ForumChannel):
-                    await forum_ch.create_thread(name=title, content=content, file=file)
-                else:
-                    await forum_ch.send(content=f"**{title}**\n{content}", file=file)
-                await msg.add_reaction("✅")
-            except: await msg.add_reaction("🧐")
-            await anti_rate()
-    await ctx.send("✅ !scan concluído.")
-
-@bot.command()
-async def limparforum(ctx, *, arg=None):
-    if not ctx.author.guild_permissions.manage_threads: return
     date = parse_date(arg)
-    forum_ch = bot.get_channel(POST_CHANNEL_ID)
-    if not date: return
-    await ctx.send(f"⚠️ Limpando tópicos anteriores a {date}...")
-    threads = forum_ch.threads + [t async for t in forum_ch.archived_threads()]
-    for t in threads:
-        if t.created_at < date:
-            try: 
-                await t.delete()
-                await asyncio.sleep(0.6)
-            except: pass
-    await ctx.send("✅ Limpeza concluída.")
+    if not emoji_alvo:
+        await ctx.send("ℹ️ Ex: `!limpar 💾 hoje` ou `!limpar tudo hoje`")
+        return
 
-@bot.command()
-async def cancelgeral(ctx):
-    global CANCEL_FLAG
-    CANCEL_FLAG = True
-    await ctx.send("🛑 Cancelamento ativado.")
+    await ctx.send(f"🧹 Limpando reações {emoji_alvo}...")
+    count = 0
+    async for msg in ctx.channel.history(limit=100):
+        if date and msg.created_at < date: continue
+        
+        if emoji_alvo.lower() == "tudo":
+            await msg.clear_reactions()
+            count += 1
+        else:
+            for reaction in msg.reactions:
+                if str(reaction.emoji) == emoji_alvo:
+                    await msg.clear_reaction(reaction.emoji)
+                    count += 1
+        await asyncio.sleep(0.4)
+    await ctx.send(f"✅ Removido de {count} mensagens.")
+
+# (Manter os comandos !downvideos, !link, !scan e !limparforum das versões anteriores)
 
 @bot.event
 async def on_ready():
