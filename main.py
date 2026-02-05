@@ -2,6 +2,7 @@ import discord
 import asyncio
 import os
 import re
+import aiohttp
 from discord.ext import commands
 from datetime import datetime, timezone, time
 
@@ -25,7 +26,8 @@ URL_PATTERN = r'(https?://[^\s]+)'
 def parse_date(text):
     if not text: return None
     try:
-        if text.lower() == "hoje":
+        text = text.lower().strip()
+        if text == "hoje":
             agora = datetime.now(timezone.utc)
             return datetime.combine(agora.date(), time.min).replace(tzinfo=timezone.utc)
         if "/" in text:
@@ -41,8 +43,7 @@ async def anti_rate():
 
 @bot.command()
 async def downvideos(ctx, *, arg=None):
-    """Varre SCAN, baixa vídeos e move para DOWNLOAD (reage com ✅)"""
-    if ctx.channel.id != SCAN_CHANNEL_ID: return
+    """Varre SCAN, move vídeos para DOWNLOAD"""
     global CANCEL_FLAG
     CANCEL_FLAG = False
     
@@ -50,7 +51,7 @@ async def downvideos(ctx, *, arg=None):
     scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
     down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    await ctx.send(f"📥 Movendo vídeos para <#{DOWNLOAD_CHANNEL_ID}>...")
+    await ctx.send(f"📥 Coletando vídeos de <#{SCAN_CHANNEL_ID}>...")
     
     async for msg in scan_ch.history(limit=None, oldest_first=True):
         if CANCEL_FLAG: break
@@ -70,8 +71,7 @@ async def downvideos(ctx, *, arg=None):
 
 @bot.command()
 async def link(ctx, *, arg=None):
-    """Varre SCAN, captura links e move para DOWNLOAD (reage com ✅)"""
-    if ctx.channel.id != SCAN_CHANNEL_ID: return
+    """Varre SCAN, captura links e move para DOWNLOAD"""
     global CANCEL_FLAG
     CANCEL_FLAG = False
     
@@ -79,7 +79,7 @@ async def link(ctx, *, arg=None):
     scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
     down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
 
-    await ctx.send("🔗 Capturando links...")
+    await ctx.send(f"🔗 Capturando links de <#{SCAN_CHANNEL_ID}>...")
     async for msg in scan_ch.history(limit=None, oldest_first=True):
         if CANCEL_FLAG: break
         if date and msg.created_at < date: continue
@@ -95,26 +95,63 @@ async def link(ctx, *, arg=None):
             await anti_rate()
     await ctx.send("✅ !link finalizado.")
 
-# ================= COMANDOS DE FÓRUM =================
+# ================= NOVO: LINKS DOWNLOAD =================
+
+@bot.command()
+async def linksdownload(ctx, *, arg=None):
+    """Valida links no canal de DOWNLOAD e reage com ✅ ou ❌"""
+    global CANCEL_FLAG
+    CANCEL_FLAG = False
+    
+    date = parse_date(arg)
+    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+
+    if not down_ch:
+        await ctx.send("❌ Canal de Download não encontrado.")
+        return
+
+    await ctx.send(f"🔍 Validando links em <#{DOWNLOAD_CHANNEL_ID}>...")
+
+    async with aiohttp.ClientSession() as session:
+        async for msg in down_ch.history(limit=None, oldest_first=True):
+            if CANCEL_FLAG: break
+            if date and msg.created_at < date: continue
+            
+            links = re.findall(URL_PATTERN, msg.content)
+            if not links: continue
+
+            for url in links:
+                try:
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            await msg.add_reaction("✅")
+                        else:
+                            await msg.add_reaction("❌")
+                except:
+                    await msg.add_reaction("❌")
+                await anti_rate()
+                
+    await ctx.send("✅ Verificação de links concluída.")
+
+# ================= COMANDOS DE FÓRUM E LIMPEZA =================
 
 @bot.command()
 async def scan(ctx, *, arg=None):
-    """Varre DOWNLOAD e posta no FÓRUM (reage com ✅ no download)"""
-    if ctx.channel.id != SCAN_CHANNEL_ID: return
-    if not arg or not arg.startswith("link"):
+    """Varre DOWNLOAD e posta no FÓRUM"""
+    if not arg or "link" not in arg.lower():
         await ctx.send("ℹ️ Use `!scan link hoje` ou `!scan link data`")
         return
 
     global CANCEL_FLAG
     CANCEL_FLAG = False
     
-    data_str = arg.replace("link", "").strip()
+    data_str = arg.lower().replace("link", "").strip()
     date = parse_date(data_str)
     
     down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
     forum_ch = bot.get_channel(POST_CHANNEL_ID)
 
-    await ctx.send("🚀 Postando no Fórum e validando com ✅...")
+    await ctx.send(f"🚀 Postando vídeos de <#{DOWNLOAD_CHANNEL_ID}> no Fórum...")
     async for msg in down_ch.history(limit=None, oldest_first=True):
         if CANCEL_FLAG: break
         if date and msg.created_at < date: continue
@@ -136,25 +173,22 @@ async def scan(ctx, *, arg=None):
             await anti_rate()
     await ctx.send("✅ !scan link finalizado.")
 
-# ================= COMANDOS DE LIMPEZA =================
-
 @bot.command()
 async def limparforum(ctx, *, arg=None):
-    """Deleta tópicos do fórum criados ANTES da data/hora informada"""
+    """Deleta tópicos criados ANTES da data/hora"""
     if not ctx.author.guild_permissions.manage_threads:
-        await ctx.send("❌ Você precisa da permissão 'Gerenciar Tópicos'.")
+        await ctx.send("❌ Permissão necessária: 'Gerenciar Tópicos'.")
         return
 
     date = parse_date(arg)
     forum_ch = bot.get_channel(POST_CHANNEL_ID)
     if not date or not isinstance(forum_ch, discord.ForumChannel):
-        await ctx.send("❌ Data inválida ou canal não é um Fórum.")
+        await ctx.send("❌ Data inválida ou canal de Post não é um Fórum.")
         return
 
     await ctx.send(f"⚠️ Limpando tópicos anteriores a {date}...")
     
     count = 0
-    # Pega tópicos ativos e arquivados
     threads = forum_ch.threads + [t async for t in forum_ch.archived_threads()]
     
     for t in threads:
