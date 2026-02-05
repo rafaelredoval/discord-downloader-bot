@@ -5,13 +5,13 @@ import re
 from discord.ext import commands
 from datetime import datetime, timezone, time
 
-# ================= VARIÁVEIS =================
+# ================= CONFIGURAÇÃO DE VARIÁVEIS =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 SCAN_CHANNEL_ID = int(os.getenv("SCAN_CHANNEL_ID"))
 DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID"))
 POST_CHANNEL_ID = int(os.getenv("POST_CHANNEL_ID"))
 
-# ================= BOT =================
+# ================= INICIALIZAÇÃO DO BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -19,12 +19,11 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 CANCEL_FLAG = False
-
-# Regex para identificar URLs
 URL_PATTERN = r'(https?://[^\s]+)'
 
 # ================= UTILITÁRIOS =================
 def parse_date(text):
+    if not text: return None
     try:
         if text.lower() == "hoje":
             agora = datetime.now(timezone.utc)
@@ -38,67 +37,135 @@ def parse_date(text):
 async def anti_rate():
     await asyncio.sleep(1.4)
 
-# ================= FUNÇÃO LINK =================
-
-async def run_move_links(ctx, start_date=None):
-    global CANCEL_FLAG
-    CANCEL_FLAG = False
-
-    scan_channel = bot.get_channel(SCAN_CHANNEL_ID)
-    download_channel = bot.get_channel(DOWNLOAD_CHANNEL_ID)
-
-    if not scan_channel or not download_channel:
-        await ctx.send("❌ Erro: Canais de Scan ou Download não configurados.")
-        return
-
-    await ctx.send(f"🔗 Capturando links em <#{SCAN_CHANNEL_ID}>...")
-
-    async for msg in scan_channel.history(limit=None, oldest_first=True):
-        if CANCEL_FLAG: break
-        if start_date and msg.created_at < start_date: continue
-        
-        # Procura por links no conteúdo da mensagem
-        links = re.findall(URL_PATTERN, msg.content)
-        
-        if links:
-            try:
-                # Monta a mensagem com os links encontrados e a menção do autor
-                links_formatados = "\n".join(links)
-                content = f"🔗 **Link enviado por:** {msg.author.mention}\n{links_formatados}"
-                
-                await download_channel.send(content=content)
-                await msg.add_reaction("✅") # Reage no canal Scan
-            except Exception as e:
-                print(f"Erro ao mover link: {e}")
-                await msg.add_reaction("❌")
-            
-            await anti_rate()
-
-    await ctx.send("✅ Comando `!link` finalizado!")
-
-# ================= COMANDOS =================
-
-@bot.command()
-async def link(ctx, *, arg=None):
-    """
-    Uso: !link ou !link hoje ou !link DD/MM/AAAA
-    Move mensagens que contenham URLs do canal Scan para o Download.
-    """
-    if ctx.channel.id != SCAN_CHANNEL_ID: return
-    date = parse_date(arg) if arg else None
-    await run_move_links(ctx, date)
+# ================= COMANDOS DE MOVIMENTAÇÃO =================
 
 @bot.command()
 async def downvideos(ctx, *, arg=None):
-    # (Mantida a lógica anterior para anexos de vídeo)
+    """Varre SCAN, baixa vídeos e move para DOWNLOAD (reage com ✅)"""
     if ctx.channel.id != SCAN_CHANNEL_ID: return
-    # ... (código anterior do downvideos)
+    global CANCEL_FLAG
+    CANCEL_FLAG = False
+    
+    date = parse_date(arg)
+    scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
+    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+
+    await ctx.send(f"📥 Movendo vídeos para <#{DOWNLOAD_CHANNEL_ID}>...")
+    
+    async for msg in scan_ch.history(limit=None, oldest_first=True):
+        if CANCEL_FLAG: break
+        if date and msg.created_at < date: continue
+        if not msg.attachments: continue
+
+        for att in msg.attachments:
+            if any(att.filename.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi', '.mkv']):
+                try:
+                    file = await att.to_file()
+                    await down_ch.send(content=f"🎬 Vídeo de: {msg.author.mention}", file=file)
+                    await msg.add_reaction("✅")
+                except:
+                    await msg.add_reaction("❌")
+                await anti_rate()
+    await ctx.send("✅ !downvideos finalizado.")
+
+@bot.command()
+async def link(ctx, *, arg=None):
+    """Varre SCAN, captura links e move para DOWNLOAD (reage com ✅)"""
+    if ctx.channel.id != SCAN_CHANNEL_ID: return
+    global CANCEL_FLAG
+    CANCEL_FLAG = False
+    
+    date = parse_date(arg)
+    scan_ch = bot.get_channel(SCAN_CHANNEL_ID)
+    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+
+    await ctx.send("🔗 Capturando links...")
+    async for msg in scan_ch.history(limit=None, oldest_first=True):
+        if CANCEL_FLAG: break
+        if date and msg.created_at < date: continue
+        
+        links = re.findall(URL_PATTERN, msg.content)
+        if links:
+            try:
+                content = f"🔗 **Link de:** {msg.author.mention}\n" + "\n".join(links)
+                await down_ch.send(content=content)
+                await msg.add_reaction("✅")
+            except:
+                await msg.add_reaction("❌")
+            await anti_rate()
+    await ctx.send("✅ !link finalizado.")
+
+# ================= COMANDOS DE FÓRUM =================
 
 @bot.command()
 async def scan(ctx, *, arg=None):
-    # (Mantida a lógica anterior para postagem no fórum)
+    """Varre DOWNLOAD e posta no FÓRUM (reage com ✅ no download)"""
     if ctx.channel.id != SCAN_CHANNEL_ID: return
-    # ... (código anterior do scan post/link)
+    if not arg or not arg.startswith("link"):
+        await ctx.send("ℹ️ Use `!scan link hoje` ou `!scan link data`")
+        return
+
+    global CANCEL_FLAG
+    CANCEL_FLAG = False
+    
+    data_str = arg.replace("link", "").strip()
+    date = parse_date(data_str)
+    
+    down_ch = bot.get_channel(DOWNLOAD_CHANNEL_ID)
+    forum_ch = bot.get_channel(POST_CHANNEL_ID)
+
+    await ctx.send("🚀 Postando no Fórum e validando com ✅...")
+    async for msg in down_ch.history(limit=None, oldest_first=True):
+        if CANCEL_FLAG: break
+        if date and msg.created_at < date: continue
+        if not msg.attachments: continue
+
+        title = f"@{msg.mentions[0].display_name}" if msg.mentions else f"Post de {msg.author.display_name}"
+        header = f"🎬 Enviado por: **{msg.author.display_name}**"
+
+        for att in msg.attachments:
+            try:
+                file = await att.to_file()
+                if isinstance(forum_ch, discord.ForumChannel):
+                    await forum_ch.create_thread(name=title, content=header, file=file)
+                else:
+                    await forum_ch.send(content=f"**{title}**\n{header}", file=file)
+                await msg.add_reaction("✅")
+            except:
+                await msg.add_reaction("🧐")
+            await anti_rate()
+    await ctx.send("✅ !scan link finalizado.")
+
+# ================= COMANDOS DE LIMPEZA =================
+
+@bot.command()
+async def limparforum(ctx, *, arg=None):
+    """Deleta tópicos do fórum criados ANTES da data/hora informada"""
+    if not ctx.author.guild_permissions.manage_threads:
+        await ctx.send("❌ Você precisa da permissão 'Gerenciar Tópicos'.")
+        return
+
+    date = parse_date(arg)
+    forum_ch = bot.get_channel(POST_CHANNEL_ID)
+    if not date or not isinstance(forum_ch, discord.ForumChannel):
+        await ctx.send("❌ Data inválida ou canal não é um Fórum.")
+        return
+
+    await ctx.send(f"⚠️ Limpando tópicos anteriores a {date}...")
+    
+    count = 0
+    # Pega tópicos ativos e arquivados
+    threads = forum_ch.threads + [t async for t in forum_ch.archived_threads()]
+    
+    for t in threads:
+        if t.created_at < date:
+            try:
+                await t.delete()
+                count += 1
+                await asyncio.sleep(0.5)
+            except: pass
+            
+    await ctx.send(f"✅ Sucesso! {count} tópicos removidos.")
 
 @bot.command()
 async def cancelgeral(ctx):
@@ -110,5 +177,4 @@ async def cancelgeral(ctx):
 async def on_ready():
     print(f"✅ Bot Online: {bot.user}")
 
-if __name__ == "__main__":
-    bot.run(TOKEN)
+bot.run(TOKEN)
